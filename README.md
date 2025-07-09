@@ -2,7 +2,6 @@
 
 A modern WiFi modem that emulates the Intel 8251 USART for vintage Timex/Sinclair computers, replacing traditional modems with network connectivity.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%20Pico%20W-green.svg)
 ![Language](https://img.shields.io/badge/language-MicroPython-yellow.svg)
 
