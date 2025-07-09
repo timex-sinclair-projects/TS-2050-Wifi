@@ -1,858 +1,1386 @@
 """
-Intel 8251 USART Emulator for Raspberry Pi Pico W
-Emulates 8251 behavior for Timex/Sinclair computers
-Ports: 73h (data), 77h (control/status)
+8251 USART Emulator for RP2040 Pico W - MicroPython Version
+Emulates the Intel 8251 USART for Timex/Sinclair 2050 modem functionality
 
-Hardware Interface:
-- 74HC688: 8-bit address comparator for complete port decoding
-- 74HC138: Secondary decoder for A2-A0 bits  
-- 74LVC245: Bidirectional data bus buffer (5V ↔ 3.3V)
-- 74LVC125: Quad level shifter for control signals (5V → 3.3V)
+v1.0 - INITIAL COMPLETE VERSION
 
-Power Requirements:
-- 5V input to VBUS (pin 40) and 74HC688 chips
-- 3V3_EN (pin 37) tied to 5V via 10kΩ for reliable regulator enable
-- 3V3_OUT (pin 36) powers 74LVC245 & 74LVC125
+DEBUGGING FEATURES:
+- Comprehensive logging to Thonny console with timestamps
+- Categorized debug output (SYSTEM, GPIO, USART, NETWORK, HAYES, INTERFACE)
+- Memory usage monitoring
+- GPIO state tracking  
+- Network connection monitoring
+- Hayes AT command parsing and execution
+- Interface monitoring with register access logging
 
-Complete Address Decoding:
-- Port 73h: Responds ONLY to exact address 01110011
-- Port 77h: Responds ONLY to exact address 01110111  
-- Prevents conflicts with other I/O devices (03h, 13h, etc.)
+INTERACTIVE COMMANDS (type in Thonny console):
+- CONNECT <host> <port>   Connect to telnet host: CONNECT towel.blinkenlights.nl 23
+- DISCONNECT              Disconnect current connection
+- AT <command>            Send Hayes AT command: AT DT5551234
+- STATUS                  Show system status and statistics
+- MEMORY                  Show memory usage
+- GPIO                    Show current GPIO pin states  
+- DEBUG <category>        Toggle debug category on/off
+- WIFI <ssid> <password>  Connect to WiFi network
+- HELP                    Show this command list
 
-Note: GPIO assignments avoid WiFi reserved pins (23, 24, 25) on Pico W
+DEBUG CONFIGURATION:
+Set the DEBUG_* flags below to control logging verbosity:
+- DEBUG_ENABLED: Master switch for all debugging
+- DEBUG_GPIO: Pin state changes and register access
+- DEBUG_USART: USART register operations and data flow
+- DEBUG_NETWORK: Network connection status and data
+- DEBUG_HAYES: Hayes AT command processing
+- DEBUG_INTERFACE: Host interface monitoring
+- DEBUG_SYSTEM: Initialization, memory usage, system status
+- DEBUG_VERBOSE: Extra detailed output
+
+HARDWARE CONNECTIONS (8251 USART interface):
+- GP0-GP7: Data bus D0-D7 (bidirectional)
+- GP8: C/D (Control/Data select)
+- GP9: RD (Read strobe, active low)
+- GP10: WR (Write strobe, active low)  
+- GP11: CS (Chip Select, active low)
+- GP12: RESET (Reset, active high)
+- GP13: TxRDY (Transmitter Ready output)
+- GP14: RxRDY (Receiver Ready output)
+- GP15: CLK (Clock input)
+
+HAYES AT COMMANDS SUPPORTED:
+- ATD<number>   Dial (connect to host:port format like ATD192.168.1.100:23)
+- ATH           Hang up (disconnect)
+- ATA           Answer (not implemented for client mode)
+- ATI           Information
+- ATZ           Reset modem
+- AT&F          Factory defaults
+- ATO           Return to online mode
+- +++           Escape to command mode
+
+WIFI AT COMMANDS:
+- AT+CWLAP      List available WiFi access points
+- AT+CWJAP?     Query current WiFi connection
+- AT+CWJAP="ssid","password"  Connect to WiFi network
+- AT+CWQAP      Disconnect from WiFi
+- AT+CWSTAT     Show WiFi connection status
+- AT+CWSCAN     Scan for networks (alias for CWLAP)
+
+USAGE:
+1. Connect to WiFi using WIFI command
+2. Use CONNECT command or ATD command to establish connections
+3. Monitor debug output in console
+4. Send commands via Z80 interface OR type commands in Thonny
+
+DEBUG OUTPUT FORMAT:
+[timestamp] CATEGORY: message
+Example: [00012847] HAYES: Processing AT command: ATD192.168.1.100:23
 """
 
 import machine
-import utime
+import time
 import _thread
-import socket
+from machine import Pin
+import gc
 import network
+import socket
 import select
-import json
-import os
-from collections import deque
+import re
 
-class DebugLogger:
-    """Comprehensive logging system for 8251 emulator debugging"""
-    
-    # Log levels
-    LOG_NONE = 0
-    LOG_ERROR = 1
-    LOG_WARNING = 2  
-    LOG_INFO = 3
-    LOG_DEBUG = 4
-    LOG_TRACE = 5
-    
-    def __init__(self, log_level=LOG_INFO):
-        self.log_level = log_level
-        self.start_time = utime.ticks_ms()
-        self.log_count = 0
-        
-    def _should_log(self, level):
-        return level <= self.log_level
-        
-    def _timestamp(self):
-        """Get timestamp in milliseconds since startup"""
-        return utime.ticks_diff(utime.ticks_ms(), self.start_time)
-        
-    def _log(self, level, category, message, data=None):
-        """Internal logging function"""
-        if not self._should_log(level):
-            return
-            
-        self.log_count += 1
-        timestamp = self._timestamp()
-        
-        level_names = ["NONE", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"]
-        level_name = level_names[min(level, len(level_names)-1)]
-        
-        log_line = f"[{timestamp:8d}ms] {level_name:5s} {category:8s}: {message}"
-        
-        if data is not None:
-            if isinstance(data, dict):
-                data_str = " | ".join([f"{k}={v}" for k, v in data.items()])
-            else:
-                data_str = str(data)
-            log_line += f" | {data_str}"
-            
-        print(log_line)
-        
-    def error(self, category, message, data=None):
-        self._log(self.LOG_ERROR, category, message, data)
-        
-    def warning(self, category, message, data=None):
-        self._log(self.LOG_WARNING, category, message, data)
-        
-    def info(self, category, message, data=None):
-        self._log(self.LOG_INFO, category, message, data)
-        
-    def debug(self, category, message, data=None):
-        self._log(self.LOG_DEBUG, category, message, data)
-        
-    def trace(self, category, message, data=None):
-        self._log(self.LOG_TRACE, category, message, data)
-        
-    def log_gpio_state(self, pin_name, pin_number, value, direction=""):
-        """Log GPIO pin state changes"""
-        data = {"pin": pin_number, "value": value, "dir": direction}
-        self.trace("GPIO", f"{pin_name} state", data)
-        
-    def log_bus_cycle(self, cycle_type, port, data_value=None, success=True):
-        """Log Z80 bus cycles"""
-        data = {"port": f"0x{port:02X}", "success": success}
-        if data_value is not None:
-            data["data"] = f"0x{data_value:02X}"
-        self.debug("BUS", f"{cycle_type} cycle", data)
-        
-    def log_8251_operation(self, operation, register, value, state=None):
-        """Log 8251 register operations"""
-        data = {"reg": register, "value": f"0x{value:02X}"}
-        if state:
-            data["state"] = state
-        self.info("8251", f"{operation}", data)
-        
-    def log_network_event(self, event, details=None):
-        """Log network-related events"""
-        self.info("NETWORK", event, details)
-        
-    def log_at_command(self, command, response=None, success=True):
-        """Log AT command processing"""
-        data = {"cmd": command[:20], "success": success}  # Truncate long commands
-        if response:
-            data["resp"] = response[:30]  # Truncate long responses
-        self.info("AT_CMD", "Command processed", data)
-        
-    def set_log_level(self, level):
-        """Change logging verbosity at runtime"""
-        self.log_level = level
-        self.info("LOGGER", f"Log level changed to {level}")
+# Debug configuration - Set these to True/False to control logging
+DEBUG_ENABLED = True      # Master debug switch
+DEBUG_GPIO = True         # GPIO pin state changes and register access
+DEBUG_USART = True        # USART register operations
+DEBUG_NETWORK = True      # Network operations
+DEBUG_HAYES = True        # Hayes AT command processing
+DEBUG_INTERFACE = True    # Interface monitoring
+DEBUG_SYSTEM = True       # System initialization and memory
+DEBUG_VERBOSE = False     # Extra verbose output
 
-# Global logger instance
-logger = DebugLogger(DebugLogger.LOG_DEBUG)  # Start with DEBUG level
+# Memory conservation mode - reduces debug output during initialization
+MEMORY_CONSERVATIVE = True
 
-class Intel8251Emulator:
-    """Intel 8251 USART Emulator with WiFi modem functionality"""
+# 8251 USART Pin definitions
+PIN_D0 = 0
+PIN_D1 = 1
+PIN_D2 = 2
+PIN_D3 = 3
+PIN_D4 = 4
+PIN_D5 = 5
+PIN_D6 = 6
+PIN_D7 = 7
+PIN_CD = 8      # Control/Data select
+PIN_RD = 9      # Read strobe (active low)
+PIN_WR = 10     # Write strobe (active low)
+PIN_CS = 11     # Chip Select (active low)
+PIN_RESET = 12  # Reset (active high)
+PIN_TXRDY = 13  # Transmitter Ready output
+PIN_RXRDY = 14  # Receiver Ready output
+PIN_CLK = 15    # Clock input
+
+# 8251 Register addresses
+REG_DATA = 0
+REG_STATUS_COMMAND = 1
+
+# 8251 Status Register bits
+STATUS_TXRDY = 0x01     # Transmitter Ready
+STATUS_RXRDY = 0x02     # Receiver Ready
+STATUS_TXE = 0x04       # Transmitter Empty
+STATUS_PE = 0x08        # Parity Error
+STATUS_OE = 0x10        # Overrun Error
+STATUS_FE = 0x20        # Framing Error
+STATUS_SYNDET = 0x40    # Sync Detect
+STATUS_DSR = 0x80       # Data Set Ready
+
+# Hayes AT command responses
+HAYES_OK = "OK"
+HAYES_ERROR = "ERROR"
+HAYES_CONNECT = "CONNECT"
+HAYES_NO_CARRIER = "NO CARRIER"
+HAYES_BUSY = "BUSY"
+HAYES_NO_ANSWER = "NO ANSWER"
+
+def debug_print(category, message):
+    """Print debug message with timestamp if debugging is enabled"""
+    if not DEBUG_ENABLED:
+        return
+        
+    timestamp = time.ticks_ms()
     
-    # GPIO Pin Definitions (Pico W compatible - avoiding WiFi pins 23,24,25)
-    DATA_DIR_PIN = 14      # 74LVC245 direction control
-    DATA_OE_PIN = 15       # 74LVC245 output enable
-    PORT_73H_PIN = 12      # 74HC688 #1 P=Q output (port 73h select)
-    PORT_77H_PIN = 13      # 74HC688 #2 P=Q output (port 77h select)  
-    WR_PIN = 11            # Z80 Write signal (via 74LVC125)
-    RD_PIN = 10            # Z80 Read signal (via 74LVC125)
-    
-    # Data bus pins (GPIO 0-7) - avoids WiFi reserved pins
-    DATA_BUS_BASE = 0
-    
-    # 8251 States
-    STATE_RESET = 0
-    STATE_MODE_INSTRUCTION = 1
-    STATE_COMMAND_INSTRUCTION = 2
-    STATE_OPERATIONAL = 3
-    
-    # Status register bits
-    STATUS_TXRDY = 0x01    # Transmitter ready
-    STATUS_RXRDY = 0x02    # Receiver ready
-    STATUS_TXE = 0x04      # Transmitter empty
-    STATUS_PE = 0x08       # Parity error
-    STATUS_OE = 0x10       # Overrun error
-    STATUS_FE = 0x20       # Framing error
-    STATUS_SYNDET = 0x40   # Sync detect
-    STATUS_DSR = 0x80      # Data set ready
-    
-    # Command register bits
-    CMD_TXEN = 0x01       # Transmit enable
-    CMD_DTR = 0x02        # Data terminal ready
-    CMD_RXEN = 0x04       # Receive enable
-    CMD_SBRK = 0x08       # Send break
-    CMD_ER = 0x10         # Error reset
-    CMD_RTS = 0x20        # Request to send
-    CMD_IR = 0x40         # Internal reset
-    CMD_EH = 0x80         # Enter hunt mode
-    
+    # Check category-specific debug flags
+    if category == "GPIO" and not DEBUG_GPIO:
+        return
+    elif category == "USART" and not DEBUG_USART:
+        return
+    elif category == "NETWORK" and not DEBUG_NETWORK:
+        return
+    elif category == "HAYES" and not DEBUG_HAYES:
+        return
+    elif category == "INTERFACE" and not DEBUG_INTERFACE:
+        return
+    elif category == "SYSTEM" and not DEBUG_SYSTEM:
+        return
+        
+    print(f"[{timestamp:08d}] {category}: {message}")
+
+def debug_verbose(category, message):
+    """Print verbose debug message only if verbose debugging is enabled"""
+    if DEBUG_VERBOSE:
+        debug_print(category, message)
+
+def debug_memory():
+    """Print memory usage information"""
+    if DEBUG_SYSTEM:
+        gc.collect()
+        free = gc.mem_free()
+        alloc = gc.mem_alloc()
+        debug_print("SYSTEM", f"Memory: {free} free, {alloc} allocated")
+
+def debug_config_summary():
+    """Print current debug configuration"""
+    debug_print("SYSTEM", "=== DEBUG CONFIGURATION ===")
+    debug_print("SYSTEM", f"Master Debug: {DEBUG_ENABLED}")
+    debug_print("SYSTEM", f"GPIO Debug: {DEBUG_GPIO}")
+    debug_print("SYSTEM", f"USART Debug: {DEBUG_USART}")
+    debug_print("SYSTEM", f"Network Debug: {DEBUG_NETWORK}")
+    debug_print("SYSTEM", f"Hayes Debug: {DEBUG_HAYES}")
+    debug_print("SYSTEM", f"Interface Debug: {DEBUG_INTERFACE}")
+    debug_print("SYSTEM", f"System Debug: {DEBUG_SYSTEM}")
+    debug_print("SYSTEM", f"Verbose Debug: {DEBUG_VERBOSE}")
+    debug_print("SYSTEM", "=== END CONFIGURATION ===")
+
+# Global variables for command interface and system state
+usart_instance = None
+command_enabled = True
+wifi_ssid = None
+wifi_password = None
+
+class USART8251Emulator:
     def __init__(self):
-        """Initialize the 8251 emulator"""
-        logger.info("INIT", "Starting 8251 USART Emulator")
+        """Initialize the 8251 USART emulator"""
+        # Force garbage collection before starting
+        gc.collect()
         
-        self.state = self.STATE_RESET
-        self.mode_instruction = 0
-        self.command_instruction = 0
-        self.status_register = self.STATUS_TXE | self.STATUS_TXRDY
+        debug_print("SYSTEM", "Initializing 8251 USART Emulator...")
+        initial_mem = gc.mem_free()
+        debug_print("SYSTEM", f"Initial free memory: {initial_mem} bytes")
         
-        # Data buffers
-        self.rx_buffer = deque((), 1024)  # Receive buffer
-        self.tx_buffer = deque((), 1024)  # Transmit buffer
+        # Initialize all attributes
+        self.mode_instruction_written = False
+        self.command_instruction = 0x00
+        self.status_register = STATUS_TXE | STATUS_TXRDY  # Initially ready to transmit
+        self.data_register = 0x00
+        self.rx_buffer = []
+        self.tx_buffer = []
         
-        # Network connection
-        self.wifi_connected = False
-        self.socket_connection = None
-        self.at_command_mode = True
-        self.at_buffer = ""
+        # Network state
+        self.connected = False
+        self.socket = None
+        self.connection_host = None
+        self.connection_port = None
         
-        # Host shortcuts (phonebook)
-        self.shortcuts = {}  # Dict: {index: {"host": "hostname:port", "desc": "description"}}
-        self.shortcuts_file = "shortcuts.json"
-        self.load_shortcuts()
+        # Hayes modem state
+        self.command_mode = True
+        self.command_buffer = ""
+        self.escape_count = 0
+        self.last_char_time = 0
         
-        # Initialize hardware
-        logger.info("INIT", "Configuring GPIO pins")
-        self.setup_gpio()
+        # Statistics
+        self.total_bytes_rx = 0
+        self.total_bytes_tx = 0
+        self.register_reads = 0
+        self.register_writes = 0
         
-        logger.info("INIT", "Setting up WiFi interface")
-        self.setup_wifi()
+        # Initialize hardware systems
+        try:
+            debug_print("SYSTEM", "Setting up GPIO pins...")
+            self.setup_gpio()
+            
+            debug_print("SYSTEM", "Setting up WiFi...")
+            self.setup_wifi()
+            
+        except Exception as e:
+            debug_print("SYSTEM", f"FATAL ERROR during initialization: {e}")
+            raise
         
-        # Start background tasks
-        logger.info("INIT", "Starting background threads")
-        _thread.start_new_thread(self.network_handler, ())
-        _thread.start_new_thread(self.bus_monitor, ())
-        
-        logger.info("INIT", "8251 USART Emulator initialized successfully")
+        # Final memory check
+        gc.collect()
+        final_mem = gc.mem_free()
+        used_mem = initial_mem - final_mem
+        debug_print("SYSTEM", f"8251 USART Emulator ready - Used {used_mem} bytes, {final_mem} bytes free")
+
+        if final_mem < 30000:  # Less than 30KB free
+            debug_print("SYSTEM", "WARNING: Low memory after initialization")
     
     def setup_gpio(self):
-        """Configure GPIO pins for bus interface"""
-        logger.debug("GPIO", "Setting up control pins")
-        
-        # Control pins
-        self.data_dir = machine.Pin(self.DATA_DIR_PIN, machine.Pin.OUT)
-        self.data_oe = machine.Pin(self.DATA_OE_PIN, machine.Pin.OUT)
-        self.port_73h = machine.Pin(self.PORT_73H_PIN, machine.Pin.IN, machine.Pin.PULL_UP)
-        self.port_77h = machine.Pin(self.PORT_77H_PIN, machine.Pin.IN, machine.Pin.PULL_UP)
-        self.rd = machine.Pin(self.RD_PIN, machine.Pin.IN, machine.Pin.PULL_UP)
-        self.wr = machine.Pin(self.WR_PIN, machine.Pin.IN, machine.Pin.PULL_UP)
-        
-        logger.debug("GPIO", "Setting up data bus pins")
-        # Data bus pins - external 10kΩ pullups recommended
-        self.data_pins = []
-        for i in range(8):
-            # Note: External pullups preferred over internal for signal integrity
-            pin = machine.Pin(self.DATA_BUS_BASE + i, machine.Pin.IN)
-            self.data_pins.append(pin)
-            logger.trace("GPIO", f"Data pin GPIO{self.DATA_BUS_BASE + i} configured")
-        
-        # Configure unused pins to prevent floating inputs
-        self.setup_unused_pins()
-        
-        # Default state: disable outputs, set direction to input
-        self.data_oe.value(1)    # Disable (active low)
-        self.data_dir.value(0)   # A→B (Z80 to Pico)
-        logger.debug("GPIO", "74LVC245 configured", {"dir": "A→B", "oe": "disabled"})
-        
-        # Set up interrupts on 74HC688 decoder outputs (active low)
-        logger.debug("GPIO", "Setting up interrupt handlers")
-        self.port_73h.irq(trigger=machine.Pin.IRQ_FALLING, handler=self.port_73h_handler)
-        self.port_77h.irq(trigger=machine.Pin.IRQ_FALLING, handler=self.port_77h_handler)
-        
-        logger.info("GPIO", "All GPIO pins configured successfully")
-    
-    def setup_unused_pins(self):
-        """Configure unused GPIO pins to prevent floating inputs"""
-        unused_pins = [8, 9, 16, 17, 18, 19, 20, 21, 22, 26, 27, 28]
-        
-        logger.debug("GPIO", f"Configuring {len(unused_pins)} unused pins with pulldowns")
-        configured_count = 0
-        
-        for pin_num in unused_pins:
-            try:
-                # Configure as input with internal pulldown (lowest power)
-                pin = machine.Pin(pin_num, machine.Pin.IN, machine.Pin.PULL_DOWN)
-                logger.trace("GPIO", f"GPIO{pin_num} configured with pulldown")
-                configured_count += 1
-            except Exception as e:
-                logger.error("GPIO", f"Could not configure GPIO{pin_num}", {"error": str(e)})
-                
-        logger.info("GPIO", f"Configured {configured_count}/{len(unused_pins)} unused pins")
+        """Initialize all GPIO pins for 8251 interface"""
+        try:
+            # Data bus pins (bidirectional, start as inputs with pull-down)
+            self.data_pins = []
+            for i in range(PIN_D0, PIN_D7 + 1):
+                pin = Pin(i, Pin.IN, Pin.PULL_DOWN)
+                self.data_pins.append(pin)
+                debug_verbose("GPIO", f"Initialized data pin GP{i}")
+            
+            # Control pins (inputs with pull-up for active low signals)
+            self.cd_pin = Pin(PIN_CD, Pin.IN, Pin.PULL_UP)
+            self.rd_pin = Pin(PIN_RD, Pin.IN, Pin.PULL_UP)
+            self.wr_pin = Pin(PIN_WR, Pin.IN, Pin.PULL_UP)
+            self.cs_pin = Pin(PIN_CS, Pin.IN, Pin.PULL_UP)
+            # Reset pin with strong pull-down (active high)
+            self.reset_pin = Pin(PIN_RESET, Pin.IN, Pin.PULL_DOWN)
+            
+            # Status output pins
+            self.txrdy_pin = Pin(PIN_TXRDY, Pin.OUT)
+            self.rxrdy_pin = Pin(PIN_RXRDY, Pin.OUT)
+            
+            # Clock input pin
+            self.clk_pin = Pin(PIN_CLK, Pin.IN)
+            
+            # Set initial output states
+            self.update_status_outputs()
+            
+            # Check reset pin state at startup
+            initial_reset = self.reset_pin.value()
+            debug_print("GPIO", f"Initial reset pin state: {initial_reset}")
+            if initial_reset:
+                debug_print("GPIO", "WARNING: Reset pin is HIGH at startup! This may cause issues.")
+            
+            debug_print("GPIO", "All GPIO pins initialized successfully")
+            
+        except Exception as e:
+            debug_print("GPIO", f"GPIO initialization failed: {e}")
+            raise
     
     def setup_wifi(self):
-        """Initialize WiFi connection"""
-        self.wlan = network.WLAN(network.STA_IF)
-        self.wlan.active(True)
-        print("WiFi interface ready")
-    
-    def port_73h_handler(self, pin):
-        """Interrupt handler for port 73h (data register) from 74HC688 #1"""
-        logger.trace("BUS", "Port 73h interrupt triggered")
-        self.handle_io_cycle(is_data_port=True)
-    
-    def port_77h_handler(self, pin):
-        """Interrupt handler for port 77h (control/status register) from 74HC688 #2"""
-        logger.trace("BUS", "Port 77h interrupt triggered")
-        self.handle_io_cycle(is_data_port=False)
-    
-    def handle_io_cycle(self, is_data_port=True):
-        """Handle Z80 I/O cycle for specific port"""
-        port = 0x73 if is_data_port else 0x77
-        port_name = "DATA" if is_data_port else "CTRL"
-        
-        logger.debug("BUS", f"Handling I/O cycle", {"port": f"0x{port:02X}", "type": port_name})
-        
-        # Check which operation (read or write)
-        rd_state = self.rd.value()
-        wr_state = self.wr.value()
-        
-        logger.trace("BUS", "Control signals", {"RD": rd_state, "WR": wr_state})
-        
-        if not rd_state:  # Read operation (active low)
-            logger.debug("BUS", f"Z80 READ from port 0x{port:02X}")
-            
-            if is_data_port:
-                data = self.read_data_register()
-            else:
-                data = self.read_status_register()
-                
-            logger.debug("BUS", f"Sending data to Z80", {"port": f"0x{port:02X}", "data": f"0x{data:02X}"})
-            self.drive_data_to_z80(data)
-            
-            # Wait for read cycle to complete
-            cycle_start = utime.ticks_ms()
-            while not self.rd.value():
-                if utime.ticks_diff(utime.ticks_ms(), cycle_start) > 10:  # 10ms timeout
-                    logger.error("BUS", "Read cycle timeout")
-                    break
-                utime.sleep_us(1)
-                
-            cycle_time = utime.ticks_diff(utime.ticks_ms(), cycle_start)
-            logger.trace("BUS", f"Read cycle completed", {"duration_ms": cycle_time})
-            self.release_data_bus()
-            
-        elif not wr_state:  # Write operation (active low)
-            logger.debug("BUS", f"Z80 WRITE to port 0x{port:02X}")
-            
-            # Set up to read from Z80
-            self.data_dir.value(0)   # A→B (Z80 to Pico)
-            self.data_oe.value(0)    # Enable
-            logger.trace("BUS", "74LVC245 configured for Z80→Pico")
-            utime.sleep_us(1)        # Settling time
-            
-            data = self.read_data_from_z80()
-            logger.debug("BUS", f"Received data from Z80", {"port": f"0x{port:02X}", "data": f"0x{data:02X}"})
-            
-            if is_data_port:
-                self.write_data_register(data)
-            else:
-                self.write_control_register(data)
-                
-            # Wait for write cycle to complete
-            cycle_start = utime.ticks_ms()
-            while not self.wr.value():
-                if utime.ticks_diff(utime.ticks_ms(), cycle_start) > 10:  # 10ms timeout
-                    logger.error("BUS", "Write cycle timeout")
-                    break
-                utime.sleep_us(1)
-                
-            cycle_time = utime.ticks_diff(utime.ticks_ms(), cycle_start)
-            logger.trace("BUS", f"Write cycle completed", {"duration_ms": cycle_time})
-            self.data_oe.value(1)  # Disable
-        else:
-            logger.warning("BUS", "Invalid I/O cycle - neither RD nor WR active", {"RD": rd_state, "WR": wr_state})
-    
-    def drive_data_to_z80(self, data):
-        """Drive data onto the Z80 bus"""
-        # Configure data pins as outputs
-        for i, pin in enumerate(self.data_pins):
-            pin.init(machine.Pin.OUT)
-            pin.value((data >> i) & 1)
-        
-        # Set 74LVC245 direction: B→A (Pico to Z80)
-        self.data_dir.value(1)
-        self.data_oe.value(0)  # Enable outputs
-    
-    def read_data_from_z80(self):
-        """Read data from the Z80 bus"""
-        data = 0
-        for i, pin in enumerate(self.data_pins):
-            if pin.value():
-                data |= (1 << i)
-        return data
-    
-    def release_data_bus(self):
-        """Release the data bus (high-Z state)"""
-        self.data_oe.value(1)  # Disable 74LVC245 outputs
-        
-        # Set data pins back to inputs
-        for pin in self.data_pins:
-            pin.init(machine.Pin.IN, machine.Pin.PULL_UP)
-    
-    def read_data_register(self):
-        """Read from 8251 data register (port 73h)"""
-        if self.state != self.STATE_OPERATIONAL:
-            logger.warning("8251", "Data read in non-operational state", {"state": self.state})
-            return 0xFF
-            
-        if len(self.rx_buffer) > 0:
-            data = self.rx_buffer.popleft()
-            # Update RXRDY status
-            if len(self.rx_buffer) == 0:
-                self.status_register &= ~self.STATUS_RXRDY
-                logger.debug("8251", "RX buffer empty - clearing RXRDY")
-            
-            logger.info("8251", "Data register read", {
-                "data": f"0x{data:02X}", 
-                "char": chr(data) if 32 <= data <= 126 else ".",
-                "rx_remaining": len(self.rx_buffer)
-            })
-            return data
-        else:
-            logger.debug("8251", "Data register read - no data available")
-            return 0xFF
-    
-    def write_data_register(self, data):
-        """Write to 8251 data register (port 73h)"""
-        if self.state != self.STATE_OPERATIONAL:
-            logger.warning("8251", "Data write in non-operational state", {"state": self.state, "data": f"0x{data:02X}"})
-            return
-            
-        if self.command_instruction & self.CMD_TXEN:
-            self.tx_buffer.append(data)
-            # Clear TXRDY and TXE temporarily
-            old_status = self.status_register
-            self.status_register &= ~(self.STATUS_TXRDY | self.STATUS_TXE)
-            
-            logger.info("8251", "Data register write", {
-                "data": f"0x{data:02X}", 
-                "char": chr(data) if 32 <= data <= 126 else ".",
-                "tx_buffered": len(self.tx_buffer),
-                "status_change": f"0x{old_status:02X}→0x{self.status_register:02X}"
-            })
-            
-            # Process AT commands or send to network
-            if self.at_command_mode:
-                self.process_at_command(data)
-            else:
-                self.send_to_network(data)
-        else:
-            logger.warning("8251", "Data write with TX disabled", {"data": f"0x{data:02X}"})
-    
-    def read_status_register(self):
-        """Read from 8251 status register (port 77h)"""
-        logger.debug("8251", "Status register read", {
-            "status": f"0x{self.status_register:02X}",
-            "TXRDY": bool(self.status_register & self.STATUS_TXRDY),
-            "RXRDY": bool(self.status_register & self.STATUS_RXRDY), 
-            "TXE": bool(self.status_register & self.STATUS_TXE),
-            "DSR": bool(self.status_register & self.STATUS_DSR)
-        })
-        return self.status_register
-    
-    def write_control_register(self, data):
-        """Write to 8251 control register (port 77h)"""
-        logger.info("8251", "Control register write", {
-            "data": f"0x{data:02X}", 
-            "binary": f"{data:08b}",
-            "current_state": self.state
-        })
-        
-        if self.state == self.STATE_RESET:
-            # Any write puts us in mode instruction state
-            self.state = self.STATE_MODE_INSTRUCTION
-            self.mode_instruction = data
-            logger.info("8251", "Mode instruction received", {
-                "mode": f"0x{data:02X}",
-                "new_state": "MODE_INSTRUCTION"
-            })
-            
-        elif self.state == self.STATE_MODE_INSTRUCTION:
-            # Second write is command instruction
-            self.state = self.STATE_COMMAND_INSTRUCTION
-            self.command_instruction = data
-            logger.info("8251", "Command instruction received", {
-                "cmd": f"0x{data:02X}",
-                "TXEN": bool(data & self.CMD_TXEN),
-                "RXEN": bool(data & self.CMD_RXEN),
-                "DTR": bool(data & self.CMD_DTR),
-                "RTS": bool(data & self.CMD_RTS),
-                "new_state": "COMMAND_INSTRUCTION"
-            })
-            
-            # Process command bits
-            if data & self.CMD_IR:  # Internal reset
-                logger.info("8251", "Internal reset requested")
-                self.internal_reset()
-            else:
-                self.state = self.STATE_OPERATIONAL
-                self.update_status_from_command()
-                logger.info("8251", "Entering operational state")
-                
-        elif self.state == self.STATE_COMMAND_INSTRUCTION:
-            self.command_instruction = data
-            self.state = self.STATE_OPERATIONAL
-            self.update_status_from_command()
-            logger.info("8251", "Updated to operational state")
-            
-        elif self.state == self.STATE_OPERATIONAL:
-            # Update command instruction
-            if data & self.CMD_IR:  # Internal reset
-                logger.info("8251", "Internal reset from operational state")
-                self.internal_reset()
-            else:
-                old_cmd = self.command_instruction
-                self.command_instruction = data
-                self.update_status_from_command()
-                logger.debug("8251", "Command updated", {
-                    "old_cmd": f"0x{old_cmd:02X}",
-                    "new_cmd": f"0x{data:02X}"
-                })
-    
-    def internal_reset(self):
-        """Perform internal reset"""
-        old_state = self.state
-        self.state = self.STATE_MODE_INSTRUCTION
-        self.command_instruction = 0
-        self.status_register = self.STATUS_TXE | self.STATUS_TXRDY
-        self.rx_buffer.clear()
-        self.tx_buffer.clear()
-        
-        logger.info("8251", "Internal reset completed", {
-            "old_state": old_state,
-            "new_state": self.state,
-            "status": f"0x{self.status_register:02X}",
-            "buffers_cleared": True
-        })
-    
-    def update_status_from_command(self):
-        """Update status register based on command register"""
-        # Update DSR based on network connection
-        if self.socket_connection:
-            self.status_register |= self.STATUS_DSR
-        else:
-            self.status_register &= ~self.STATUS_DSR
-            
-        # TXRDY and TXE depend on transmit enable and buffer status
-        if self.command_instruction & self.CMD_TXEN:
-            if len(self.tx_buffer) < 512:  # Buffer not full
-                self.status_register |= self.STATUS_TXRDY
-            if len(self.tx_buffer) == 0:
-                self.status_register |= self.STATUS_TXE
-        else:
-            self.status_register &= ~(self.STATUS_TXRDY | self.STATUS_TXE)
-    
-    def process_at_command(self, data):
-        """Process AT commands"""
-        char = chr(data)
-        
-        if char == '\r' or char == '\n':
-            if self.at_buffer:
-                response = self.execute_at_command(self.at_buffer.strip())
-                self.send_response(response)
-                self.at_buffer = ""
-        elif char == '\b' or char == '\x7f':  # Backspace
-            if self.at_buffer:
-                self.at_buffer = self.at_buffer[:-1]
-        elif char.isprintable():
-            self.at_buffer += char.upper()
-    
-    def load_shortcuts(self):
-        """Load host shortcuts from flash memory"""
+        """Initialize WiFi interface"""
         try:
-            if self.shortcuts_file in os.listdir():
-                with open(self.shortcuts_file, 'r') as f:
-                    self.shortcuts = json.load(f)
-                print(f"Loaded {len(self.shortcuts)} shortcuts")
-            else:
-                self.shortcuts = {}
+            self.wlan = network.WLAN(network.STA_IF)
+            self.wlan.active(True)
+            debug_print("NETWORK", "WiFi interface initialized")
         except Exception as e:
-            print(f"Error loading shortcuts: {e}")
-            self.shortcuts = {}
-    
-    def save_shortcuts(self):
-        """Save host shortcuts to flash memory"""
-        try:
-            with open(self.shortcuts_file, 'w') as f:
-                json.dump(self.shortcuts, f)
-            return True
-        except Exception as e:
-            print(f"Error saving shortcuts: {e}")
-            return False
-    
-    def add_shortcut(self, index, host, description=""):
-        """Add or update a host shortcut"""
-        if 0 <= index <= 49:
-            self.shortcuts[str(index)] = {
-                "host": host,
-                "desc": description[:32]  # Limit description length
-            }
-            return self.save_shortcuts()
-        return False
-    
-    def delete_shortcut(self, index):
-        """Delete a host shortcut"""
-        if str(index) in self.shortcuts:
-            del self.shortcuts[str(index)]
-            return self.save_shortcuts()
-        return False
-    
-    def get_shortcut(self, index):
-        """Get a host shortcut by index"""
-        return self.shortcuts.get(str(index))
-    
-    def list_shortcuts(self):
-        """Return formatted list of all shortcuts"""
-        if not self.shortcuts:
-            return "No shortcuts stored"
-        
-        result = "STORED NUMBERS:\n"
-        for index in sorted(self.shortcuts.keys(), key=int):
-            shortcut = self.shortcuts[index]
-            host = shortcut["host"]
-            desc = shortcut.get("desc", "")
-            if desc:
-                result += f"{index:2}: {host} ({desc})\n"
-            else:
-                result += f"{index:2}: {host}\n"
-        
-        return result.rstrip()
-    
-
-        print(f"AT Command: {command}")
-        
-        if command == "AT":
-            return "OK"
-        elif command.startswith("ATDT"):
-            # Dial command - treat as hostname:port
-            target = command[4:].strip()
-            return self.connect_to_host(target)
-        elif command == "ATH" or command == "ATH0":
-            # Hang up
-            return self.disconnect()
-        elif command == "ATA":
-            # Answer (not applicable for client)
-            return "NO CARRIER"
-        elif command.startswith("AT+CWJAP="):
-            # WiFi connect (custom command)
-            # Format: AT+CWJAP="ssid","password"
-            return self.wifi_connect_command(command)
-        elif command == "AT+CWJAP?":
-            # Check WiFi status
-            if self.wifi_connected:
-                return f"OK\nConnected to {self.wlan.config('essid')}"
-            else:
-                return "NO WIFI"
-        elif command == "ATI":
-            # Identification
-            return "Pico W 8251 WiFi Modem v1.0"
-        elif command == "+++":
-            # Escape to command mode
-            self.at_command_mode = True
-            return "OK"
-        else:
-            return "ERROR"
-    
-    def wifi_connect_command(self, command):
-        """Handle WiFi connection command"""
-        try:
-            # Parse AT+CWJAP="ssid","password"
-            parts = command.split('"')
-            if len(parts) >= 4:
-                ssid = parts[1]
-                password = parts[3]
-                return self.connect_wifi(ssid, password)
-            else:
-                return "ERROR"
-        except:
-            return "ERROR"
+            debug_print("NETWORK", f"WiFi initialization failed: {e}")
+            raise
     
     def connect_wifi(self, ssid, password):
         """Connect to WiFi network"""
+        global wifi_ssid, wifi_password
+        
+        debug_print("NETWORK", f"Connecting to WiFi: {ssid}")
+        
         try:
+            if self.wlan.isconnected():
+                debug_print("NETWORK", "Disconnecting from current WiFi...")
+                self.wlan.disconnect()
+                time.sleep(1)
+            
             self.wlan.connect(ssid, password)
             
-            # Wait for connection
-            timeout = 10
-            while timeout > 0:
-                if self.wlan.status() < 0 or self.wlan.status() >= 3:
-                    break
+            # Wait for connection with timeout
+            timeout = 20
+            while not self.wlan.isconnected() and timeout > 0:
+                time.sleep(0.5)
                 timeout -= 1
-                utime.sleep(1)
+                debug_verbose("NETWORK", f"WiFi connecting... {timeout}s remaining")
             
-            if self.wlan.status() == 3:  # Connected
-                self.wifi_connected = True
-                ip = self.wlan.ifconfig()[0]
-                return f"CONNECT {ip}"
+            if self.wlan.isconnected():
+                config = self.wlan.ifconfig()
+                debug_print("NETWORK", f"WiFi connected! IP: {config[0]}")
+                wifi_ssid = ssid
+                wifi_password = password
+                self._connected_ssid = ssid  # Store for AT+CWJAP? query
+                return True
             else:
-                return "NO CARRIER"
-        except Exception as e:
-            return "ERROR"
-    
-    def connect_to_host(self, target):
-        """Connect to remote host"""
-        if not self.wifi_connected:
-            logger.warning("NETWORK", "Connection attempt without WiFi")
-            return "NO CARRIER"
-            
-        try:
-            logger.info("NETWORK", f"Attempting connection", {"target": target})
-            
-            # Parse hostname:port
-            if ':' in target:
-                host, port = target.rsplit(':', 1)
-                port = int(port)
-            else:
-                host = target
-                port = 23  # Default telnet port
+                debug_print("NETWORK", "WiFi connection failed - timeout")
+                return False
                 
-            logger.debug("NETWORK", f"Parsed connection", {"host": host, "port": port})
+        except Exception as e:
+            debug_print("NETWORK", f"WiFi connection error: {e}")
+            return False
+    
+    def read_data_bus(self):
+        """Read 8-bit value from data bus"""
+        value = 0
+        for i, pin in enumerate(self.data_pins):
+            if pin.value():
+                value |= (1 << i)
+        debug_verbose("GPIO", f"Read data bus: 0x{value:02X}")
+        return value
+    
+    def write_data_bus(self, value):
+        """Write 8-bit value to data bus"""
+        debug_verbose("GPIO", f"Write data bus: 0x{value:02X}")
+        
+        # Configure pins as outputs and set values
+        for i, pin in enumerate(self.data_pins):
+            pin.init(Pin.OUT)
+            pin.value((value >> i) & 1)
+    
+    def release_data_bus(self):
+        """Release data bus (set pins back to inputs)"""
+        for pin in self.data_pins:
+            pin.init(Pin.IN, Pin.PULL_DOWN)
+        debug_verbose("GPIO", "Released data bus")
+    
+    def update_status_outputs(self):
+        """Update TxRDY and RxRDY output pins"""
+        txrdy = bool(self.status_register & STATUS_TXRDY)
+        rxrdy = bool(self.status_register & STATUS_RXRDY)
+        
+        self.txrdy_pin.value(txrdy)
+        self.rxrdy_pin.value(rxrdy)
+        
+        debug_verbose("GPIO", f"Status outputs: TxRDY={txrdy}, RxRDY={rxrdy}")
+    
+    def read_register(self, address):
+        """Read from 8251 register"""
+        self.register_reads += 1
+        
+        if address == REG_DATA:
+            # Read data register
+            if self.rx_buffer:
+                data = self.rx_buffer.pop(0)
+                debug_print("USART", f"Read data register: 0x{data:02X} ('{chr(data) if 32 <= data <= 126 else '.'}')")
+                
+                # Update RxRDY status
+                if not self.rx_buffer:
+                    self.status_register &= ~STATUS_RXRDY
+                    self.update_status_outputs()
+                    
+                return data
+            else:
+                debug_print("USART", "Read data register: no data available")
+                return 0x00
+                
+        elif address == REG_STATUS_COMMAND:
+            # Read status register
+            debug_print("USART", f"Read status register: 0x{self.status_register:02X}")
+            return self.status_register
             
-            # Create socket connection
-            self.socket_connection = socket.socket()
-            self.socket_connection.settimeout(10)
-            self.socket_connection.connect((host, port))
+        else:
+            debug_print("USART", f"Read from invalid register: {address}")
+            return 0x00
+    
+    def write_register(self, address, value):
+        """Write to 8251 register"""
+        self.register_writes += 1
+        
+        if address == REG_DATA:
+            # Write data register
+            debug_print("USART", f"Write data register: 0x{value:02X} ('{chr(value) if 32 <= value <= 126 else '.'}')")
+            self.tx_buffer.append(value)
+            self.total_bytes_tx += 1
             
-            self.at_command_mode = False
-            logger.info("NETWORK", f"Connected successfully", {"host": host, "port": port})
-            return "CONNECT"
+            # Process transmitted data
+            self.process_tx_data(value)
+            
+        elif address == REG_STATUS_COMMAND:
+            if not self.mode_instruction_written:
+                # First write is mode instruction
+                debug_print("USART", f"Write mode instruction: 0x{value:02X}")
+                self.mode_instruction_written = True
+                # Mode instruction processing would go here
+            else:
+                # Subsequent writes are command instructions
+                debug_print("USART", f"Write command instruction: 0x{value:02X}")
+                self.command_instruction = value
+                self.process_command_instruction(value)
+                
+        else:
+            debug_print("USART", f"Write to invalid register: {address}")
+    
+    def process_command_instruction(self, command):
+        """Process 8251 command instruction"""
+        debug_print("USART", f"Processing command: 0x{command:02X}")
+        
+        # Command instruction bits:
+        # Bit 0: TxEN (Transmit Enable)
+        # Bit 1: DTR (Data Terminal Ready)
+        # Bit 2: RxEN (Receive Enable)
+        # Bit 3: SBRK (Send Break)
+        # Bit 4: ER (Error Reset)
+        # Bit 5: RTS (Request to Send)
+        # Bit 6: IR (Internal Reset)
+        # Bit 7: EH (Enter Hunt mode)
+        
+        if command & 0x40:  # Internal Reset
+            debug_print("USART", "Internal reset requested")
+            self.status_register = STATUS_TXE | STATUS_TXRDY
+            self.mode_instruction_written = False
+            
+        if command & 0x10:  # Error Reset
+            debug_print("USART", "Error reset requested")
+            self.status_register &= ~(STATUS_PE | STATUS_OE | STATUS_FE)
+        
+        self.update_status_outputs()
+    
+    def process_tx_data(self, data):
+        """Process transmitted data for Hayes AT command handling"""
+        char = chr(data) if 32 <= data <= 126 else chr(data)
+        current_time = time.ticks_ms()
+        
+        if self.command_mode:
+            # In command mode, accumulate AT commands
+            if char == '\r' or char == '\n':
+                if self.command_buffer.strip():
+                    debug_print("HAYES", f"Received command: {self.command_buffer.strip()}")
+                    response = self.process_hayes_command(self.command_buffer.strip())
+                    self.send_response(response)
+                self.command_buffer = ""
+            elif char == '\b' or char == '\x7F':  # Backspace or DEL
+                if self.command_buffer:
+                    self.command_buffer = self.command_buffer[:-1]
+            elif len(char) == 1 and ord(char) >= 32:  # Printable character
+                self.command_buffer += char
+        else:
+            # In data mode, pass through to network connection
+            if self.connected and self.socket:
+                try:
+                    self.socket.send(bytes([data]))
+                    debug_verbose("NETWORK", f"Sent to network: 0x{data:02X}")
+                except Exception as e:
+                    debug_print("NETWORK", f"Network send error: {e}")
+                    self.disconnect_network()
+            
+            # Check for escape sequence (++++)
+            if char == '+':
+                if time.ticks_diff(current_time, self.last_char_time) < 1000:  # Within 1 second
+                    self.escape_count += 1
+                else:
+                    self.escape_count = 1
+                    
+                if self.escape_count >= 3:
+                    debug_print("HAYES", "Escape sequence detected, entering command mode")
+                    self.command_mode = True
+                    self.escape_count = 0
+                    self.send_response("OK")
+            else:
+                self.escape_count = 0
+        
+        self.last_char_time = current_time
+    
+    def process_hayes_command(self, command):
+        """Process Hayes AT command and return response"""
+        command = command.upper().strip()
+        
+        if not command.startswith("AT"):
+            return HAYES_ERROR
+        
+        # Remove AT prefix
+        cmd = command[2:].strip()
+        
+        if cmd == "" or cmd == "":
+            return HAYES_OK
+        elif cmd == "I" or cmd == "I0":
+            return "Pico W 8251 USART Emulator v1.0"
+        elif cmd == "Z":
+            debug_print("HAYES", "Reset command received")
+            self.disconnect_network()
+            self.command_mode = True
+            return HAYES_OK
+        elif cmd == "&F":
+            debug_print("HAYES", "Factory defaults command")
+            return HAYES_OK
+        elif cmd == "H" or cmd == "H0":
+            debug_print("HAYES", "Hang up command")
+            self.disconnect_network()
+            return HAYES_OK
+        elif cmd.startswith("D"):
+            # Dial command - expect format like D192.168.1.100:23
+            number = cmd[1:]
+            return self.process_dial_command(number)
+        elif cmd == "O" or cmd == "O0":
+            if self.connected:
+                self.command_mode = False
+                debug_print("HAYES", "Returning to online mode")
+                return HAYES_CONNECT
+            else:
+                return HAYES_NO_CARRIER
+        # WiFi AT commands
+        elif cmd == "+CWLAP" or cmd == "+CWSCAN":
+            return self.process_wifi_scan()
+        elif cmd == "+CWJAP?":
+            return self.process_wifi_query()
+        elif cmd.startswith("+CWJAP="):
+            return self.process_wifi_connect(cmd)
+        elif cmd == "+CWQAP":
+            return self.process_wifi_disconnect()
+        elif cmd == "+CWSTAT":
+            return self.process_wifi_status()
+        else:
+            debug_print("HAYES", f"Unknown command: {cmd}")
+            return HAYES_ERROR
+    
+    def process_dial_command(self, number):
+        """Process dial command to connect to host:port"""
+        debug_print("HAYES", f"Processing dial: {number}")
+        
+        # Parse host:port format
+        if ':' in number:
+            try:
+                host, port_str = number.split(':', 1)
+                port = int(port_str)
+            except ValueError:
+                debug_print("HAYES", f"Invalid dial format: {number}")
+                return HAYES_ERROR
+        else:
+            # Default to telnet port if no port specified
+            host = number
+            port = 23
+        
+        if self.connect_network(host, port):
+            self.command_mode = False
+            return HAYES_CONNECT
+        else:
+            return HAYES_NO_CARRIER
+    
+    def connect_network(self, host, port):
+        """Connect to network host"""
+        if not self.wlan.isconnected():
+            debug_print("NETWORK", "Not connected to WiFi")
+            return False
+        
+        debug_print("NETWORK", f"Connecting to {host}:{port}")
+        
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10.0)  # 10 second timeout
+            self.socket.connect((host, port))
+            self.socket.setblocking(False)  # Non-blocking for data handling
+            
+            self.connected = True
+            self.connection_host = host
+            self.connection_port = port
+            
+            debug_print("NETWORK", f"Connected to {host}:{port}")
+            return True
             
         except Exception as e:
-            logger.error("NETWORK", f"Connection failed", {"target": target, "error": str(e)})
-            if self.socket_connection:
-                self.socket_connection.close()
-                self.socket_connection = None
-            return "NO CARRIER"
+            debug_print("NETWORK", f"Connection failed: {e}")
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
+            return False
     
-    def disconnect(self):
-        """Disconnect from remote host"""
-        if self.socket_connection:
-            logger.info("NETWORK", "Disconnecting from remote host")
-            self.socket_connection.close()
-            self.socket_connection = None
-            
-        self.at_command_mode = True
-        logger.info("NETWORK", "Returned to command mode")
-        return "NO CARRIER"
+    def disconnect_network(self):
+        """Disconnect from network"""
+        if self.socket:
+            try:
+                self.socket.close()
+                debug_print("NETWORK", "Socket closed")
+            except:
+                pass
+            self.socket = None
+        
+        self.connected = False
+        self.connection_host = None
+        self.connection_port = None
+        self.command_mode = True
+        
+        debug_print("NETWORK", "Disconnected from network")
     
     def send_response(self, response):
-        """Send AT command response to computer"""
-        logger.debug("AT_CMD", f"Sending response", {"response": response})
-        for char in response + "\r\n":
-            self.rx_buffer.append(ord(char))
+        """Send Hayes response to host"""
+        debug_print("HAYES", f"Sending response: {response}")
         
-        # Set RXRDY flag
-        self.status_register |= self.STATUS_RXRDY
-        logger.trace("8251", "RXRDY set for AT response")
-    
-    def send_to_network(self, data):
-        """Send data to network connection"""
-        if self.socket_connection:
-            try:
-                self.socket_connection.send(bytes([data]))
-                # Restore TXRDY status
-                self.status_register |= (self.STATUS_TXRDY | self.STATUS_TXE)
-                logger.trace("NETWORK", f"Data sent", {"data": f"0x{data:02X}", "char": chr(data) if 32 <= data <= 126 else "."})
-            except Exception as e:
-                logger.error("NETWORK", f"Send failed", {"error": str(e)})
-                self.disconnect()
-                self.send_response("NO CARRIER")
-    
-    def network_handler(self):
-        """Background thread to handle network data"""
-        logger.info("NETWORK", "Network handler thread started")
+        # Add response to RX buffer for host to read
+        response_bytes = (response + "\r\n").encode('ascii')
+        for byte in response_bytes:
+            self.rx_buffer.append(byte)
+            self.total_bytes_rx += 1
         
-        while True:
-            if self.socket_connection and not self.at_command_mode:
-                try:
-                    # Check for incoming data
-                    ready = select.select([self.socket_connection], [], [], 0.1)
-                    if ready[0]:
-                        data = self.socket_connection.recv(256)
-                        if data:
-                            logger.debug("NETWORK", f"Received data", {"bytes": len(data)})
-                            for byte in data:
-                                if len(self.rx_buffer) < 1024:
-                                    self.rx_buffer.append(byte)
-                                    logger.trace("NETWORK", f"Queued byte", {"data": f"0x{byte:02X}", "char": chr(byte) if 32 <= byte <= 126 else "."})
-                            
-                            # Set RXRDY flag
-                            if len(self.rx_buffer) > 0:
-                                self.status_register |= self.STATUS_RXRDY
-                        else:
-                            # Connection closed
-                            logger.info("NETWORK", "Remote host closed connection")
-                            self.disconnect()
-                            self.send_response("NO CARRIER")
-                            
-                except Exception as e:
-                    logger.error("NETWORK", f"Network handler error", {"error": str(e)})
-                    self.disconnect()
-                    self.send_response("NO CARRIER")
+        # Set RxRDY status
+        self.status_register |= STATUS_RXRDY
+        self.update_status_outputs()
+    
+    def send_multiline_response(self, lines):
+        """Send multi-line Hayes response to host"""
+        for line in lines:
+            self.send_response(line)
+    
+    def process_wifi_scan(self):
+        """Process AT+CWLAP command - scan for WiFi networks"""
+        debug_print("HAYES", "WiFi scan requested")
+        
+        if not self.wlan.active():
+            return "ERROR: WiFi not active"
+        
+        try:
+            debug_print("NETWORK", "Scanning for WiFi networks...")
+            networks = self.wlan.scan()
             
-            utime.sleep_ms(10)
+            if not networks:
+                return "No networks found"
+            
+            # Sort by signal strength (descending)
+            networks.sort(key=lambda x: x[3], reverse=True)
+            
+            response_lines = []
+            response_lines.append(f"Found {len(networks)} networks:")
+            
+            for i, (ssid, bssid, channel, RSSI, authmode, hidden) in enumerate(networks):
+                ssid_str = ssid.decode('utf-8') if ssid else "<hidden>"
+                
+                # Convert authmode to string
+                auth_modes = {
+                    0: "OPEN",
+                    1: "WEP", 
+                    2: "WPA_PSK",
+                    3: "WPA2_PSK",
+                    4: "WPA_WPA2_PSK",
+                    5: "WPA2_ENTERPRISE"
+                }
+                auth_str = auth_modes.get(authmode, f"AUTH{authmode}")
+                
+                # Format: +CWLAP:(authmode,"ssid",rssi,"mac",channel)
+                mac_str = ":".join([f"{b:02x}" for b in bssid])
+                line = f'+CWLAP:({authmode},"{ssid_str}",{RSSI},"{mac_str}",{channel},{auth_str})'
+                response_lines.append(line)
+            
+            response_lines.append("OK")
+            
+            # Send each line as separate response
+            for line in response_lines[:-1]:  # All but OK
+                self.send_response(line)
+            
+            return response_lines[-1]  # Return OK
+            
+        except Exception as e:
+            debug_print("NETWORK", f"WiFi scan error: {e}")
+            return "ERROR: Scan failed"
     
-    def bus_monitor(self):
-        """Background thread to monitor bus status"""
-        while True:
-            # Update status register periodically
-            self.update_status_from_command()
-            utime.sleep_ms(50)
+    def process_wifi_query(self):
+        """Process AT+CWJAP? command - query current WiFi connection"""
+        debug_print("HAYES", "WiFi connection query")
+        
+        if not self.wlan.isconnected():
+            return '+CWJAP:"",""'
+        
+        # Note: MicroPython doesn't provide direct access to connected SSID
+        # We'll use the stored values from our connection
+        if hasattr(self, '_connected_ssid'):
+            return f'+CWJAP:"{self._connected_ssid}","connected"'
+        else:
+            config = self.wlan.ifconfig()
+            return f'+CWJAP:"<unknown>","{config[0]}"'
+    
+    def process_wifi_connect(self, cmd):
+        """Process AT+CWJAP="ssid","password" command"""
+        debug_print("HAYES", f"WiFi connect command: {cmd}")
+        
+        # Parse the command: +CWJAP="ssid","password"
+        # Use regex to extract quoted strings
+        pattern = r'\+CWJAP="([^"]*)"(?:,"([^"]*)")?'
+        match = re.match(pattern, cmd)
+        
+        if not match:
+            return "ERROR: Invalid format. Use: AT+CWJAP=\"ssid\",\"password\""
+        
+        ssid = match.group(1)
+        password = match.group(2) if match.group(2) is not None else ""
+        
+        debug_print("NETWORK", f"Connecting to WiFi: {ssid}")
+        
+        if self.connect_wifi(ssid, password):
+            self._connected_ssid = ssid  # Store for query command
+            return HAYES_OK
+        else:
+            return "ERROR: Connection failed"
+    
+    def process_wifi_disconnect(self):
+        """Process AT+CWQAP command - disconnect from WiFi"""
+        debug_print("HAYES", "WiFi disconnect requested")
+        
+        try:
+            if self.wlan.isconnected():
+                # Disconnect network connection first if active
+                if self.connected:
+                    self.disconnect_network()
+                
+                self.wlan.disconnect()
+                debug_print("NETWORK", "WiFi disconnected")
+                
+                if hasattr(self, '_connected_ssid'):
+                    delattr(self, '_connected_ssid')
+                    
+                return HAYES_OK
+            else:
+                return "ERROR: Not connected to WiFi"
+                
+        except Exception as e:
+            debug_print("NETWORK", f"WiFi disconnect error: {e}")
+            return "ERROR: Disconnect failed"
+    
+    def process_wifi_status(self):
+        """Process AT+CWSTAT command - show detailed WiFi status"""
+        debug_print("HAYES", "WiFi status requested")
+        
+        try:
+            response_lines = []
+            
+            if self.wlan.isconnected():
+                config = self.wlan.ifconfig()
+                response_lines.append("+CWSTAT:CONNECTED")
+                response_lines.append(f"IP: {config[0]}")
+                response_lines.append(f"Subnet: {config[1]}")
+                response_lines.append(f"Gateway: {config[2]}")
+                response_lines.append(f"DNS: {config[3]}")
+                
+                if hasattr(self, '_connected_ssid'):
+                    response_lines.append(f"SSID: {self._connected_ssid}")
+                
+            else:
+                response_lines.append("+CWSTAT:DISCONNECTED")
+                if self.wlan.active():
+                    response_lines.append("WiFi interface: ACTIVE")
+                else:
+                    response_lines.append("WiFi interface: INACTIVE")
+            
+            response_lines.append("OK")
+            
+            # Send multi-line response
+            for line in response_lines[:-1]:
+                self.send_response(line)
+            
+            return response_lines[-1]
+            
+        except Exception as e:
+            debug_print("NETWORK", f"WiFi status error: {e}")
+            return "ERROR: Status query failed"
+    
+    def handle_network_data(self):
+        """Handle incoming network data"""
+        if not self.connected or not self.socket:
+            return
+        
+        try:
+            # Use select to check for available data
+            ready = select.select([self.socket], [], [], 0)
+            if ready[0]:
+                data = self.socket.recv(1024)
+                if data:
+                    debug_verbose("NETWORK", f"Received {len(data)} bytes from network")
+                    
+                    # Add to RX buffer
+                    for byte in data:
+                        self.rx_buffer.append(byte)
+                        self.total_bytes_rx += 1
+                    
+                    # Set RxRDY status
+                    self.status_register |= STATUS_RXRDY
+                    self.update_status_outputs()
+                else:
+                    # Connection closed by remote
+                    debug_print("NETWORK", "Connection closed by remote")
+                    self.disconnect_network()
+                    self.send_response(HAYES_NO_CARRIER)
+                    
+        except OSError as e:
+            if e.errno != 11:  # EAGAIN - no data available
+                debug_print("NETWORK", f"Network receive error: {e}")
+                self.disconnect_network()
+                self.send_response(HAYES_NO_CARRIER)
+    
+    def monitor_interface(self):
+        """Monitor the host interface for register access"""
+        last_cs = 1
+        last_rd = 1
+        last_wr = 1
+        last_reset = 0
+        reset_processed = False
+        
+        debug_print("INTERFACE", "Starting interface monitoring...")
+        
+        try:
+            while True:
+                # Check for reset with debouncing
+                current_reset = self.reset_pin.value()
+                
+                # Detect rising edge of reset (going from low to high)
+                if last_reset == 0 and current_reset == 1 and not reset_processed:
+                    debug_print("INTERFACE", "Reset signal asserted")
+                    self.status_register = STATUS_TXE | STATUS_TXRDY
+                    self.mode_instruction_written = False
+                    self.rx_buffer.clear()
+                    self.tx_buffer.clear()
+                    self.update_status_outputs()
+                    reset_processed = True
+                    last_reset = current_reset
+                    continue
+                elif current_reset == 0:
+                    # Reset released, allow next reset detection
+                    reset_processed = False
+                
+                last_reset = current_reset
+                
+                # Skip normal operations while in reset
+                if current_reset:
+                    time.sleep_us(100)  # Short delay while in reset
+                    continue
+                
+                # Check chip select and control signals
+                cs = self.cs_pin.value()
+                rd = self.rd_pin.value()
+                wr = self.wr_pin.value()
+                cd = self.cd_pin.value()
+                
+                # Detect falling edge of CS (chip selected)
+                if last_cs == 1 and cs == 0:
+                    debug_verbose("INTERFACE", "Chip selected")
+                
+                # Detect register access (CS low and RD or WR strobed)
+                if cs == 0:  # Chip is selected
+                    # Read operation (RD falling edge)
+                    if last_rd == 1 and rd == 0:
+                        address = REG_STATUS_COMMAND if cd else REG_DATA
+                        data = self.read_register(address)
+                        self.write_data_bus(data)
+                        debug_print("INTERFACE", f"Read from {'STATUS' if cd else 'DATA'} register: 0x{data:02X}")
+                    
+                    # Write operation (WR falling edge)
+                    elif last_wr == 1 and wr == 0:
+                        address = REG_STATUS_COMMAND if cd else REG_DATA
+                        data = self.read_data_bus()
+                        self.write_register(address, data)
+                        debug_print("INTERFACE", f"Write to {'COMMAND' if cd else 'DATA'} register: 0x{data:02X}")
+                    
+                    # Release data bus when not reading
+                    elif rd == 1:
+                        self.release_data_bus()
+                
+                # Handle network data
+                self.handle_network_data()
+                
+                # Store previous states
+                last_cs = cs
+                last_rd = rd
+                last_wr = wr
+                
+                time.sleep_us(10)  # Small delay to prevent excessive polling
+                
+        except KeyboardInterrupt:
+            debug_print("INTERFACE", "Interface monitoring stopped by user")
+        except Exception as e:
+            debug_print("INTERFACE", f"Interface monitoring error: {e}")
+            raise
+    
+    def get_status_summary(self):
+        """Get comprehensive status summary"""
+        status = {
+            'connected': self.connected,
+            'host': self.connection_host,
+            'port': self.connection_port,
+            'command_mode': self.command_mode,
+            'wifi_connected': self.wlan.isconnected(),
+            'wifi_ip': self.wlan.ifconfig()[0] if self.wlan.isconnected() else None,
+            'rx_buffer_size': len(self.rx_buffer),
+            'tx_buffer_size': len(self.tx_buffer),
+            'total_bytes_rx': self.total_bytes_rx,
+            'total_bytes_tx': self.total_bytes_tx,
+            'register_reads': self.register_reads,
+            'register_writes': self.register_writes,
+            'status_register': self.status_register
+        }
+        return status
 
-# Main execution
-def main():
-    """Main program entry point"""
-    print("=" * 60)
-    print("Intel 8251 USART Emulator for Raspberry Pi Pico W")
-    print("=" * 60)
+# Command interface functions
+def cmd_pins(args):
+    """PINS command - show pin configuration and expected states"""
+    print("8251 USART PIN CONFIGURATION:")
+    print("-" * 40)
+    print("Data Bus:")
+    print("  GP0-GP7  = D0-D7 (bidirectional)")
+    print("")
+    print("Control Inputs (from host):")
+    print("  GP8  = C/D (Control/Data select)")
+    print("  GP9  = RD (Read strobe, active LOW)")
+    print("  GP10 = WR (Write strobe, active LOW)")
+    print("  GP11 = CS (Chip Select, active LOW)")
+    print("  GP12 = RESET (Reset, active HIGH)")
+    print("")
+    print("Status Outputs (to host):")
+    print("  GP13 = TxRDY (Transmitter Ready)")
+    print("  GP14 = RxRDY (Receiver Ready)")
+    print("")
+    print("Clock Input:")
+    print("  GP15 = CLK (Clock input)")
+    print("")
+    print("NORMAL IDLE STATE:")
+    print("  CS=1, RD=1, WR=1, RESET=0, C/D=X")
+    print("")
+    print("TROUBLESHOOTING:")
+    print("- If getting reset loops: Check GP12 is not floating")
+    print("- GP12 should be connected to GND or controlled by host")
+    print("- Use GPIO command to check current pin states")
+
+def cmd_connect(args):
+    """CONNECT command - connect to host"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    if len(args) < 2:
+        print("USAGE: CONNECT <host> <port>")
+        print("EXAMPLES:")
+        print("  CONNECT towel.blinkenlights.nl 23")
+        print("  CONNECT 192.168.1.100 22")
+        return
+    
+    host = args[0]
+    try:
+        port = int(args[1])
+    except ValueError:
+        print(f"ERROR: Invalid port number: {args[1]}")
+        return
+    
+    if usart_instance.connect_network(host, port):
+        print(f"CONNECTED to {host}:{port}")
+    else:
+        print(f"CONNECTION FAILED to {host}:{port}")
+
+def cmd_disconnect(args):
+    """DISCONNECT command"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    usart_instance.disconnect_network()
+    print("DISCONNECTED")
+
+def cmd_at(args):
+    """AT command - send Hayes command"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    if not args:
+        print("USAGE: AT <command>")
+        print("EXAMPLES:")
+        print("  AT I")
+        print("  AT D192.168.1.100:23")
+        print("  AT H")
+        print("  AT +CWLAP")
+        print('  AT +CWJAP="MyNetwork","MyPassword"')
+        print("  AT +CWSTAT")
+        return
+    
+    command = "AT" + " ".join(args)
+    response = usart_instance.process_hayes_command(command)
+    print(f"COMMAND: {command}")
+    print(f"RESPONSE: {response}")
+
+def cmd_wifi(args):
+    """WIFI command - connect to WiFi"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    if len(args) < 2:
+        print("USAGE: WIFI <ssid> <password>")
+        print("EXAMPLE: WIFI MyNetwork MyPassword123")
+        return
+    
+    ssid = args[0]
+    password = args[1]
+    
+    print(f"Connecting to WiFi: {ssid}")
+    if usart_instance.connect_wifi(ssid, password):
+        config = usart_instance.wlan.ifconfig()
+        print(f"WiFi connected! IP: {config[0]}")
+    else:
+        print("WiFi connection failed")
+
+def cmd_status(args):
+    """STATUS command - show system status"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    status = usart_instance.get_status_summary()
+    
+    print("8251 USART EMULATOR STATUS:")
+    print("-" * 40)
+    print(f"WiFi Connected: {status['wifi_connected']}")
+    if status['wifi_ip']:
+        print(f"WiFi IP: {status['wifi_ip']}")
+    
+    print(f"Network Connected: {status['connected']}")
+    if status['connected']:
+        print(f"Connected to: {status['host']}:{status['port']}")
+    
+    print(f"Command Mode: {status['command_mode']}")
+    print(f"RX Buffer: {status['rx_buffer_size']} bytes")
+    print(f"TX Buffer: {status['tx_buffer_size']} bytes")
+    print(f"Total RX: {status['total_bytes_rx']} bytes")
+    print(f"Total TX: {status['total_bytes_tx']} bytes")
+    print(f"Register Reads: {status['register_reads']}")
+    print(f"Register Writes: {status['register_writes']}")
+    print(f"Status Register: 0x{status['status_register']:02X}")
+    
+    # Memory status
+    gc.collect()
+    free_mem = gc.mem_free()
+    alloc_mem = gc.mem_alloc()
+    total_mem = free_mem + alloc_mem
+    print(f"Memory: {free_mem} free / {total_mem} total ({(free_mem/total_mem)*100:.1f}% free)")
+
+def cmd_memory(args):
+    """MEMORY command - show memory usage"""
+    gc.collect()
+    free = gc.mem_free()
+    alloc = gc.mem_alloc()
+    total = free + alloc
+    
+    print("MEMORY USAGE:")
+    print("-" * 20)
+    print(f"Free:      {free:6d} bytes ({(free/total)*100:.1f}%)")
+    print(f"Allocated: {alloc:6d} bytes ({(alloc/total)*100:.1f}%)")
+    print(f"Total:     {total:6d} bytes")
+
+def cmd_gpio(args):
+    """GPIO command - show GPIO states"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    print("GPIO PIN STATES:")
+    print("-" * 20)
+    cs_val = usart_instance.cs_pin.value()
+    rd_val = usart_instance.rd_pin.value()
+    wr_val = usart_instance.wr_pin.value()
+    cd_val = usart_instance.cd_pin.value()
+    reset_val = usart_instance.reset_pin.value()
+    txrdy_val = usart_instance.txrdy_pin.value()
+    rxrdy_val = usart_instance.rxrdy_pin.value()
+    
+    print(f"CS:    {cs_val} {'(SELECTED)' if cs_val == 0 else '(NOT SELECTED)'}")
+    print(f"RD:    {rd_val} {'(READING)' if rd_val == 0 else '(IDLE)'}")
+    print(f"WR:    {wr_val} {'(WRITING)' if wr_val == 0 else '(IDLE)'}")
+    print(f"C/D:   {cd_val} {'(STATUS/CMD)' if cd_val == 1 else '(DATA)'}")
+    print(f"RESET: {reset_val} {'(RESET ACTIVE!)' if reset_val == 1 else '(NORMAL)'}")
+    print(f"TxRDY: {txrdy_val}")
+    print(f"RxRDY: {rxrdy_val}")
+    
+    # Data bus
+    data_value = 0
+    for i, pin in enumerate(usart_instance.data_pins):
+        if pin.value():
+            data_value |= (1 << i)
+    print(f"Data Bus: 0x{data_value:02X}")
+    
+    # Warning if reset is stuck high
+    if reset_val == 1:
+        print("")
+        print("WARNING: Reset pin is HIGH!")
+        print("This will cause continuous reset cycles.")
+        print("Check if GP12 is connected to 3.3V or floating.")
+        print("Expected: GP12 should be LOW (0V) during normal operation.")
+
+def cmd_debug(args):
+    """DEBUG command - toggle debug categories"""
+    global DEBUG_GPIO, DEBUG_USART, DEBUG_NETWORK, DEBUG_HAYES, DEBUG_INTERFACE, DEBUG_SYSTEM, DEBUG_VERBOSE
+    
+    if not args:
+        print("DEBUG CATEGORIES:")
+        print(f"  GPIO: {DEBUG_GPIO}")
+        print(f"  USART: {DEBUG_USART}")
+        print(f"  NETWORK: {DEBUG_NETWORK}")
+        print(f"  HAYES: {DEBUG_HAYES}")
+        print(f"  INTERFACE: {DEBUG_INTERFACE}")
+        print(f"  SYSTEM: {DEBUG_SYSTEM}")
+        print(f"  VERBOSE: {DEBUG_VERBOSE}")
+        print("USAGE: DEBUG <category> to toggle")
+        return
+    
+    category = args[0].upper()
+    if category == "GPIO":
+        DEBUG_GPIO = not DEBUG_GPIO
+        print(f"GPIO debug: {DEBUG_GPIO}")
+    elif category == "USART":
+        DEBUG_USART = not DEBUG_USART
+        print(f"USART debug: {DEBUG_USART}")
+    elif category == "NETWORK":
+        DEBUG_NETWORK = not DEBUG_NETWORK
+        print(f"NETWORK debug: {DEBUG_NETWORK}")
+    elif category == "HAYES":
+        DEBUG_HAYES = not DEBUG_HAYES
+        print(f"HAYES debug: {DEBUG_HAYES}")
+    elif category == "INTERFACE":
+        DEBUG_INTERFACE = not DEBUG_INTERFACE
+        print(f"INTERFACE debug: {DEBUG_INTERFACE}")
+    elif category == "SYSTEM":
+        DEBUG_SYSTEM = not DEBUG_SYSTEM
+        print(f"SYSTEM debug: {DEBUG_SYSTEM}")
+    elif category == "VERBOSE":
+        DEBUG_VERBOSE = not DEBUG_VERBOSE
+        print(f"VERBOSE debug: {DEBUG_VERBOSE}")
+    else:
+        print(f"Unknown debug category: {category}")
+
+def cmd_help(args):
+    """HELP command - show available commands"""
+    print("8251 USART EMULATOR COMMANDS:")
+    print("-" * 40)
+    print("CONNECT <host> <port>   Connect to telnet/SSH host")
+    print("DISCONNECT              Disconnect current connection")
+    print("AT <command>            Send Hayes AT command")
+    print("WIFI <ssid> <password>  Connect to WiFi network")
+    print("STATUS                  Show system status")
+    print("MEMORY                  Show memory usage")
+    print("GPIO                    Show GPIO pin states")
+    print("PINS                    Show pin configuration")
+    print("DEBUG <category>        Toggle debug category")
+    print("HELP                    Show this help")
+    print("QUIT/EXIT/BYE          Exit command interface")
+    print("")
+    print("HAYES AT COMMANDS:")
+    print("ATI       - Information")
+    print("ATZ       - Reset modem") 
+    print("ATH       - Hang up")
+    print("ATD<host:port> - Dial/connect")
+    print("ATO       - Return to online mode")
+    print("+++       - Escape to command mode")
+    print("")
+    print("WIFI AT COMMANDS:")
+    print("AT+CWLAP  - List/scan WiFi networks")
+    print("AT+CWJAP? - Query current WiFi connection")
+    print('AT+CWJAP="ssid","pass" - Connect to WiFi')
+    print("AT+CWQAP  - Disconnect from WiFi")
+    print("AT+CWSTAT - Show WiFi status details")
+    print("AT+CWSCAN - Alias for CWLAP")
+    print("")
+    print("EXAMPLES:")
+    print("WIFI MyNetwork MyPassword")
+    print("CONNECT towel.blinkenlights.nl 23")
+    print("AT DTowel.blinkenlights.nl:23")
+    print("AT +CWLAP")
+    print('AT +CWJAP="MyNetwork","MyPassword"')
+    print("AT H")
+
+def cmd_quit(args):
+    """QUIT command - exit command interface"""
+    global command_enabled
+    command_enabled = False
+    print("Exiting command interface...")
+    return False
+
+# Command lookup table
+COMMANDS = {
+    'CONNECT': cmd_connect,
+    'DISCONNECT': cmd_disconnect,
+    'AT': cmd_at,
+    'WIFI': cmd_wifi,
+    'STATUS': cmd_status,
+    'MEMORY': cmd_memory,
+    'GPIO': cmd_gpio,
+    'PINS': cmd_pins,
+    'DEBUG': cmd_debug,
+    'HELP': cmd_help,
+    'QUIT': cmd_quit,
+    'EXIT': cmd_quit,
+    'BYE': cmd_quit,
+    '?': cmd_help
+}
+
+def process_command(command_line):
+    """Process a command from the console"""
+    command_line = command_line.strip()
+    if not command_line:
+        return True  # Continue
+    
+    parts = command_line.split()
+    command = parts[0].upper()
+    args = parts[1:] if len(parts) > 1 else []
+    
+    # Handle quit/exit commands directly
+    if command in ['QUIT', 'EXIT', 'BYE']:
+        print("Goodbye!")
+        return False  # Exit
+    
+    if command in COMMANDS:
+        try:
+            result = COMMANDS[command](args)
+            # Some commands may return False to indicate exit
+            if result is False:
+                return False
+        except Exception as e:
+            print(f"COMMAND ERROR: {e}")
+            debug_print("SYSTEM", f"Command '{command}' failed: {e}")
+    else:
+        print(f"UNKNOWN COMMAND: {command}")
+        print("Type HELP for available commands")
+    
+    return True  # Continue
+
+def command_interface():
+    """Interactive command interface"""
+    print("\n" + "="*50)
+    print("8251 USART EMULATOR COMMAND INTERFACE READY")
+    print("Type HELP for available commands")
+    print("Examples:")
+    print("  WIFI MyNetwork MyPassword")
+    print("  CONNECT towel.blinkenlights.nl 23")
+    print("  AT DTowel.blinkenlights.nl:23")
+    print("  STATUS")
+    print("  QUIT")
+    print("="*50)
     
     try:
-        logger.info("MAIN", "Starting 8251 emulator")
-        emulator = Intel8251Emulator()
-        
-        logger.info("MAIN", "8251 Emulator running successfully")
-        print("8251 Emulator running")
-        print("Hardware: Dual 74HC688 + 74LVC245 + 74LVC125")
-        print("Power: 5V→VBUS, 3V3_EN→5V via 10kΩ, 3V3_OUT→LVC chips")
-        print("Complete 8-bit address decoding: ONLY ports 73h & 77h")
-        print("Data bus: GPIO0-7 (avoids WiFi pins 23-25)")
-        print("")
-        print("Debug Logging Features:")
-        print("- Current log level:", logger.log_level)
-        print("- Use ATLOG0-5 to change verbosity (0=none, 5=trace)")
-        print("- All operations logged to Thonny console")
-        print("")
-        print("Commands:")
-        print("- Help: AT?")
-        print("- Connect WiFi: AT+CWJAP=\"ssid\",\"password\"")
-        print("- Store shortcut: AT&Z0=hostname:port,description")
-        print("- Dial shortcut: ATDS0")
-        print("- Dial host: ATDT hostname:port")
-        print("- View shortcuts: AT&V")
-        print("- Hang up: ATH")
-        print("- Debug level: ATLOG0-5")
-        print("")
-        print("Logging Legend:")
-        print("  ERROR(1) - Critical errors only") 
-        print("  WARN(2)  - Warnings + errors")
-        print("  INFO(3)  - General info + above")
-        print("  DEBUG(4) - Debug info + above")
-        print("  TRACE(5) - All details + above")
-        print("")
-        print("Ready for Z80 bus operations...")
-        
-        # Keep main thread alive and provide status updates
-        last_status_time = utime.ticks_ms()
-        
-        while True:
-            current_time = utime.ticks_ms()
-            
-            # Print status every 30 seconds
-            if utime.ticks_diff(current_time, last_status_time) > 30000:
-                logger.info("STATUS", "Periodic status", {
-                    "wifi": emulator.wifi_connected,
-                    "connection": bool(emulator.socket_connection),
-                    "cmd_mode": emulator.at_command_mode,
-                    "rx_buffer": len(emulator.rx_buffer),
-                    "tx_buffer": len(emulator.tx_buffer),
-                    "8251_state": emulator.state,
-                    "log_count": logger.log_count
-                })
-                last_status_time = current_time
-                
-            utime.sleep(1)
-            
-    except KeyboardInterrupt:
-        logger.info("MAIN", "Shutdown requested by user")
-        print("Shutting down...")
+        while command_enabled:
+            try:
+                # Get command from user
+                command_line = input("> ")
+                if not process_command(command_line):
+                    break  # User requested quit
+            except EOFError:
+                # Handle Ctrl+D
+                print("\nGoodbye!")
+                break
+            except KeyboardInterrupt:
+                # Handle Ctrl+C
+                print("\nUse QUIT to exit or continue typing commands...")
+                continue
     except Exception as e:
-        logger.error("MAIN", f"Fatal error", {"error": str(e)})
-        print(f"Fatal error: {e}")
+        debug_print("SYSTEM", f"Command interface error: {e}")
+    
+    debug_print("SYSTEM", "Command interface terminated")
+
+def core1_main():
+    """Main function for core 1 (USART emulation)"""
+    global usart_instance
+    
+    debug_print("SYSTEM", "=== CORE1 STARTED ===")
+    debug_print("SYSTEM", "Core1: Initializing 8251 USART emulator...")
+    
+    try:
+        usart_instance = USART8251Emulator()
+        debug_print("SYSTEM", "Core1: 8251 USART emulator initialized successfully")
+    except Exception as e:
+        debug_print("SYSTEM", f"Core1: FATAL ERROR during initialization: {e}")
+        return
+    
+    # Monitor interface
+    debug_print("SYSTEM", "Core1: Starting interface monitoring...")
+    try:
+        usart_instance.monitor_interface()
+    except KeyboardInterrupt:
+        debug_print("SYSTEM", "Core1: Interface monitoring stopped by user")
+    except Exception as e:
+        debug_print("SYSTEM", f"Core1: FATAL ERROR in interface monitoring: {e}")
+        raise
+
+def main():
+    """Main program"""
+    global command_enabled
+    
+    debug_print("SYSTEM", "=== 8251 USART EMULATOR STARTING ===")
+    debug_config_summary()
+    
+    print("***************************")
+    print("*  8251 USART Emulator    *") 
+    print("*  Timex/Sinclair 2050    *")
+    print("*  Modem Replacement v1.0 *")
+    print("***************************")
+    
+    debug_memory()
+    
+    # Launch USART emulation on second core
+    debug_print("SYSTEM", "Starting Core1 thread for USART emulation...")
+    try:
+        _thread.start_new_thread(core1_main, ())
+        debug_print("SYSTEM", "Core1 thread started successfully")
+    except Exception as e:
+        debug_print("SYSTEM", f"FATAL ERROR: Could not start Core1 thread: {e}")
+        return
+    
+    # Wait for USART to initialize
+    debug_print("SYSTEM", "Waiting for USART initialization...")
+    timeout = 50  # 5 seconds
+    while usart_instance is None and timeout > 0:
+        time.sleep(0.1)
+        timeout -= 1
+    
+    if usart_instance is None:
+        debug_print("SYSTEM", "ERROR: USART failed to initialize")
+        return
+    
+    debug_print("SYSTEM", "USART initialized, starting command interface...")
+    
+    # Check memory status
+    gc.collect()
+    free_mem = gc.mem_free()
+    if free_mem < 20000:
+        print(f"\nWARNING: Low memory ({free_mem} bytes free)")
+    else:
+        print(f"\nMemory OK: {free_mem} bytes available")
+    
+    # Hardware setup reminder
+    print("\nHARDWARE CONNECTIONS:")
+    print("Data Bus: GP0-GP7 (D0-D7)")
+    print("Control:  GP8=C/D, GP9=RD, GP10=WR, GP11=CS, GP12=RESET")
+    print("Status:   GP13=TxRDY, GP14=RxRDY")
+    print("Clock:    GP15=CLK")
+    
+    print("\nGETTING STARTED:")
+    print("1. Connect to WiFi: WIFI YourSSID YourPassword")
+    print("   Or use AT command: AT +CWJAP=\"YourSSID\",\"YourPassword\"")
+    print("2. Scan networks: AT +CWLAP")
+    print("3. Connect to host: CONNECT hostname port")
+    print("4. Or use AT commands: AT Dhostname:port")
+    
+    # Main core runs the command interface
+    try:
+        command_interface()
+    except KeyboardInterrupt:
+        debug_print("SYSTEM", "=== SHUTDOWN: Keyboard interrupt received ===")
+        print("\nShutdown requested by user")
+        command_enabled = False
+    except Exception as e:
+        debug_print("SYSTEM", f"=== FATAL ERROR in command interface: {e} ===")
+        raise
     finally:
-        logger.info("MAIN", "8251 emulator stopped")
+        debug_print("SYSTEM", "=== 8251 USART EMULATOR TERMINATING ===")
 
 if __name__ == "__main__":
     main()
