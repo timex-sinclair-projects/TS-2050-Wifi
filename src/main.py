@@ -13,19 +13,7 @@ import network
 import socket
 import select
 import re
-
-# Debug configuration - Set these to True/False to control logging
-DEBUG_ENABLED = True      # Master debug switch
-DEBUG_GPIO = False        # GPIO pin state changes and register access
-DEBUG_USART = True        # USART register operations
-DEBUG_NETWORK = True      # Network operations
-DEBUG_HAYES = True        # Hayes AT command processing
-DEBUG_INTERFACE = False   # Interface monitoring
-DEBUG_SYSTEM = True       # System initialization and memory
-DEBUG_VERBOSE = False     # Extra verbose output
-
-# Memory conservation mode - reduces debug output during initialization
-MEMORY_CONSERVATIVE = True
+import debug
 
 # 8251 USART Pin definitions
 PIN_D0 = 0
@@ -67,36 +55,6 @@ HAYES_NO_CARRIER = "NO CARRIER"
 HAYES_BUSY = "BUSY"
 HAYES_NO_ANSWER = "NO ANSWER"
 
-def debug_print(category, message):
-    """Print debug message with timestamp if debugging is enabled"""
-    if not DEBUG_ENABLED:
-        return
-    # Check category-specific debug flags
-    if ((category == "GPIO" and not DEBUG_GPIO) or
-        (category == "USART" and not DEBUG_USART) or
-        (category == "NETWORK" and not DEBUG_NETWORK) or
-        (category == "HAYES" and not DEBUG_HAYES) or
-        (category == "INTERFACE" and not DEBUG_INTERFACE) or
-        (category == "SYSTEM" and not DEBUG_SYSTEM)):
-        return
-    print(f"[{time.ticks_ms():08d}] {category}: {message}")
-
-def debug_verbose(category, message):
-    """Print verbose debug message only if verbose debugging is enabled"""
-    if DEBUG_VERBOSE:
-        debug_print(category, message)
-
-def debug_memory():
-    """Print memory usage information"""
-    if DEBUG_SYSTEM:
-        gc.collect()
-        debug_print("SYSTEM", f"Memory: {gc.mem_free()} free, {gc.mem_alloc()} allocated")
-
-def debug_config_summary():
-    """Print current debug configuration"""
-    if DEBUG_SYSTEM:
-        debug_print("SYSTEM", f"Debug: GPIO={DEBUG_GPIO} USART={DEBUG_USART} NET={DEBUG_NETWORK} HAYES={DEBUG_HAYES}")
-
 # Global variables for command interface and system state
 usart_instance = None
 command_enabled = True
@@ -112,10 +70,10 @@ def save_wifi_config(ssid, password):
     try:
         with open(WIFI_CONFIG_FILE, 'w') as f:
             f.write(f"{ssid}\n{password}")
-        debug_print("SYSTEM", f"WiFi config saved: {ssid}")
+        debug.debug_print("SYSTEM", f"WiFi config saved: {ssid}")
         return True
     except Exception as e:
-        debug_print("SYSTEM", f"Failed to save WiFi config: {e}")
+        debug.debug_print("SYSTEM", f"Failed to save WiFi config: {e}")
         return False
 
 def load_wifi_config():
@@ -126,16 +84,16 @@ def load_wifi_config():
             if len(lines) >= 2:
                 ssid = lines[0]
                 password = lines[1]
-                debug_print("SYSTEM", f"WiFi config loaded: {ssid}")
+                debug.debug_print("SYSTEM", f"WiFi config loaded: {ssid}")
                 return ssid, password
             else:
-                debug_print("SYSTEM", "Invalid WiFi config file format")
+                debug.debug_print("SYSTEM", "Invalid WiFi config file format")
                 return None, None
     except OSError:
-        debug_print("SYSTEM", "No saved WiFi config found")
+        debug.debug_print("SYSTEM", "No saved WiFi config found")
         return None, None
     except Exception as e:
-        debug_print("SYSTEM", f"Failed to load WiFi config: {e}")
+        debug.debug_print("SYSTEM", f"Failed to load WiFi config: {e}")
         return None, None
 
 def clear_wifi_config():
@@ -143,13 +101,13 @@ def clear_wifi_config():
     try:
         import os
         os.remove(WIFI_CONFIG_FILE)
-        debug_print("SYSTEM", "WiFi config cleared")
+        debug.debug_print("SYSTEM", "WiFi config cleared")
         return True
     except OSError:
-        debug_print("SYSTEM", "No WiFi config file to clear")
+        debug.debug_print("SYSTEM", "No WiFi config file to clear")
         return True
     except Exception as e:
-        debug_print("SYSTEM", f"Failed to clear WiFi config: {e}")
+        debug.debug_print("SYSTEM", f"Failed to clear WiFi config: {e}")
         return False
 
 def auto_connect_wifi():
@@ -157,26 +115,26 @@ def auto_connect_wifi():
     global wifi_ssid, wifi_password, usart_instance
     
     if not AUTO_CONNECT_ENABLED:
-        debug_print("SYSTEM", "Auto-connect disabled")
+        debug.debug_print("SYSTEM", "Auto-connect disabled")
         return False
         
     if not usart_instance:
-        debug_print("SYSTEM", "USART not initialized, skipping auto-connect")
+        debug.debug_print("SYSTEM", "USART not initialized, skipping auto-connect")
         return False
     
     ssid, password = load_wifi_config()
     if ssid and password:
-        debug_print("SYSTEM", f"Auto-connecting to WiFi: {ssid}")
+        debug.debug_print("SYSTEM", f"Auto-connecting to WiFi: {ssid}")
         if usart_instance.connect_wifi(ssid, password):
             wifi_ssid = ssid
             wifi_password = password
-            debug_print("SYSTEM", "Auto-connect successful!")
+            debug.debug_print("SYSTEM", "Auto-connect successful!")
             return True
         else:
-            debug_print("SYSTEM", "Auto-connect failed")
+            debug.debug_print("SYSTEM", "Auto-connect failed")
             return False
     else:
-        debug_print("SYSTEM", "No saved WiFi credentials for auto-connect")
+        debug.debug_print("SYSTEM", "No saved WiFi credentials for auto-connect")
         return False
 
 class USART8251Emulator:
@@ -185,9 +143,9 @@ class USART8251Emulator:
         # Force garbage collection before starting
         gc.collect()
         
-        debug_print("SYSTEM", "Initializing 8251 USART Emulator...")
+        debug.debug_print("SYSTEM", "Initializing 8251 USART Emulator...")
         initial_mem = gc.mem_free()
-        debug_print("SYSTEM", f"Initial free memory: {initial_mem} bytes")
+        debug.debug_print("SYSTEM", f"Initial free memory: {initial_mem} bytes")
         
         # Initialize all attributes
         self.mode_instruction_written = False
@@ -217,24 +175,24 @@ class USART8251Emulator:
         
         # Initialize hardware systems
         try:
-            debug_print("SYSTEM", "Setting up GPIO pins...")
+            debug.debug_print("SYSTEM", "Setting up GPIO pins...")
             self.setup_gpio()
             
-            debug_print("SYSTEM", "Setting up WiFi...")
+            debug.debug_print("SYSTEM", "Setting up WiFi...")
             self.setup_wifi()
             
         except Exception as e:
-            debug_print("SYSTEM", f"FATAL ERROR during initialization: {e}")
+            debug.debug_print("SYSTEM", f"FATAL ERROR during initialization: {e}")
             raise
         
         # Final memory check
         gc.collect()
         final_mem = gc.mem_free()
         used_mem = initial_mem - final_mem
-        debug_print("SYSTEM", f"8251 USART Emulator ready - Used {used_mem} bytes, {final_mem} bytes free")
+        debug.debug_print("SYSTEM", f"8251 USART Emulator ready - Used {used_mem} bytes, {final_mem} bytes free")
 
         if final_mem < 30000:  # Less than 30KB free
-            debug_print("SYSTEM", "WARNING: Low memory after initialization")
+            debug.debug_print("SYSTEM", "WARNING: Low memory after initialization")
     
     def setup_gpio(self):
         """Initialize all GPIO pins for 8251 interface"""
@@ -258,12 +216,12 @@ class USART8251Emulator:
             
             # Check reset pin state at startup
             if self.reset_pin.value():
-                debug_print("GPIO", "WARNING: Reset pin HIGH at startup!")
+                debug.debug_print("GPIO", "WARNING: Reset pin HIGH at startup!")
             
-            debug_print("GPIO", "GPIO pins initialized")
+            debug.debug_print("GPIO", "GPIO pins initialized")
             
         except Exception as e:
-            debug_print("GPIO", f"GPIO init failed: {e}")
+            debug.debug_print("GPIO", f"GPIO init failed: {e}")
             raise
     
     def setup_wifi(self):
@@ -271,20 +229,20 @@ class USART8251Emulator:
         try:
             self.wlan = network.WLAN(network.STA_IF)
             self.wlan.active(True)
-            debug_print("NETWORK", "WiFi interface initialized")
+            debug.debug_print("NETWORK", "WiFi interface initialized")
         except Exception as e:
-            debug_print("NETWORK", f"WiFi initialization failed: {e}")
+            debug.debug_print("NETWORK", f"WiFi initialization failed: {e}")
             raise
     
     def connect_wifi(self, ssid, password):
         """Connect to WiFi network"""
         global wifi_ssid, wifi_password
         
-        debug_print("NETWORK", f"Connecting to WiFi: {ssid}")
+        debug.debug_print("NETWORK", f"Connecting to WiFi: {ssid}")
         
         try:
             if self.wlan.isconnected():
-                debug_print("NETWORK", "Disconnecting from current WiFi...")
+                debug.debug_print("NETWORK", "Disconnecting from current WiFi...")
                 self.wlan.disconnect()
                 time.sleep(1)
             
@@ -298,25 +256,24 @@ class USART8251Emulator:
             
             if self.wlan.isconnected():
                 config = self.wlan.ifconfig()
-                debug_print("NETWORK", f"WiFi connected! IP: {config[0]}")
+                debug.debug_print("NETWORK", f"WiFi connected! IP: {config[0]}")
                 
                 # Save credentials to global variables and persistent storage
-                global wifi_ssid, wifi_password
                 wifi_ssid = ssid
                 wifi_password = password
                 self._connected_ssid = ssid  # Store for AT+CWJAP? query
                 
                 # Save to persistent storage
                 if save_wifi_config(ssid, password):
-                    debug_print("NETWORK", "WiFi credentials saved")
+                    debug.debug_print("NETWORK", "WiFi credentials saved")
                 
                 return True
             else:
-                debug_print("NETWORK", "WiFi connection failed - timeout")
+                debug.debug_print("NETWORK", "WiFi connection failed - timeout")
                 return False
                 
         except Exception as e:
-            debug_print("NETWORK", f"WiFi connection error: {e}")
+            debug.debug_print("NETWORK", f"WiFi connection error: {e}")
             return False
     
     def read_data_bus(self):
@@ -325,12 +282,12 @@ class USART8251Emulator:
         for i, pin in enumerate(self.data_pins):
             if pin.value():
                 value |= (1 << i)
-        debug_verbose("GPIO", f"Read data bus: 0x{value:02X}")
+        debug.debug_verbose("GPIO", f"Read data bus: 0x{value:02X}")
         return value
     
     def write_data_bus(self, value):
         """Write 8-bit value to data bus"""
-        debug_verbose("GPIO", f"Write data bus: 0x{value:02X}")
+        debug.debug_verbose("GPIO", f"Write data bus: 0x{value:02X}")
         
         # Configure pins as outputs and set values
         for i, pin in enumerate(self.data_pins):
@@ -341,7 +298,7 @@ class USART8251Emulator:
         """Release data bus (set pins back to inputs)"""
         for pin in self.data_pins:
             pin.init(Pin.IN, Pin.PULL_DOWN)
-        debug_verbose("GPIO", "Released data bus")
+        debug.debug_verbose("GPIO", "Released data bus")
     
     def update_status_outputs(self):
         """Update TxRDY and RxRDY output pins"""
@@ -351,7 +308,7 @@ class USART8251Emulator:
         self.txrdy_pin.value(txrdy)
         self.rxrdy_pin.value(rxrdy)
         
-        debug_verbose("GPIO", f"Status outputs: TxRDY={txrdy}, RxRDY={rxrdy}")
+        debug.debug_verbose("GPIO", f"Status outputs: TxRDY={txrdy}, RxRDY={rxrdy}")
     
     def read_register(self, address):
         """Read from 8251 register"""
@@ -361,7 +318,7 @@ class USART8251Emulator:
             # Read data register
             if self.rx_buffer:
                 data = self.rx_buffer.pop(0)
-                debug_print("USART", f"Read data register: 0x{data:02X} ('{chr(data) if 32 <= data <= 126 else '.'}')")
+                debug.debug_print("USART", f"Read data register: 0x{data:02X} ('{chr(data) if 32 <= data <= 126 else '.'}')")
                 
                 # Update RxRDY status
                 if not self.rx_buffer:
@@ -370,16 +327,16 @@ class USART8251Emulator:
                     
                 return data
             else:
-                debug_print("USART", "Read data register: no data available")
+                debug.debug_print("USART", "Read data register: no data available")
                 return 0x00
                 
         elif address == REG_STATUS_COMMAND:
             # Read status register
-            debug_print("USART", f"Read status register: 0x{self.status_register:02X}")
+            debug.debug_print("USART", f"Read status register: 0x{self.status_register:02X}")
             return self.status_register
             
         else:
-            debug_print("USART", f"Read from invalid register: {address}")
+            debug.debug_print("USART", f"Read from invalid register: {address}")
             return 0x00
     
     def write_register(self, address, value):
@@ -388,7 +345,7 @@ class USART8251Emulator:
         
         if address == REG_DATA:
             # Write data register
-            debug_print("USART", f"Write data register: 0x{value:02X} ('{chr(value) if 32 <= value <= 126 else '.'}')")
+            debug.debug_print("USART", f"Write data register: 0x{value:02X} ('{chr(value) if 32 <= value <= 126 else '.'}')")
             self.tx_buffer.append(value)
             self.total_bytes_tx += 1
             
@@ -398,39 +355,29 @@ class USART8251Emulator:
         elif address == REG_STATUS_COMMAND:
             if not self.mode_instruction_written:
                 # First write is mode instruction
-                debug_print("USART", f"Write mode instruction: 0x{value:02X}")
+                debug.debug_print("USART", f"Write mode instruction: 0x{value:02X}")
                 self.mode_instruction_written = True
                 # Mode instruction processing would go here
             else:
                 # Subsequent writes are command instructions
-                debug_print("USART", f"Write command instruction: 0x{value:02X}")
+                debug.debug_print("USART", f"Write command instruction: 0x{value:02X}")
                 self.command_instruction = value
                 self.process_command_instruction(value)
                 
         else:
-            debug_print("USART", f"Write to invalid register: {address}")
+            debug.debug_print("USART", f"Write to invalid register: {address}")
     
     def process_command_instruction(self, command):
         """Process 8251 command instruction"""
-        debug_print("USART", f"Processing command: 0x{command:02X}")
-        
-        # Command instruction bits:
-        # Bit 0: TxEN (Transmit Enable)
-        # Bit 1: DTR (Data Terminal Ready)
-        # Bit 2: RxEN (Receive Enable)
-        # Bit 3: SBRK (Send Break)
-        # Bit 4: ER (Error Reset)
-        # Bit 5: RTS (Request to Send)
-        # Bit 6: IR (Internal Reset)
-        # Bit 7: EH (Enter Hunt mode)
+        debug.debug_print("USART", f"Processing command: 0x{command:02X}")
         
         if command & 0x40:  # Internal Reset
-            debug_print("USART", "Internal reset requested")
+            debug.debug_print("USART", "Internal reset requested")
             self.status_register = STATUS_TXE | STATUS_TXRDY
             self.mode_instruction_written = False
             
         if command & 0x10:  # Error Reset
-            debug_print("USART", "Error reset requested")
+            debug.debug_print("USART", "Error reset requested")
             self.status_register &= ~(STATUS_PE | STATUS_OE | STATUS_FE)
         
         self.update_status_outputs()
@@ -444,7 +391,7 @@ class USART8251Emulator:
             # In command mode, accumulate AT commands
             if char == '\r' or char == '\n':
                 if self.command_buffer.strip():
-                    debug_print("HAYES", f"Received command: {self.command_buffer.strip()}")
+                    debug.debug_print("HAYES", f"Received command: {self.command_buffer.strip()}")
                     response = self.process_hayes_command(self.command_buffer.strip())
                     self.send_response(response)
                 self.command_buffer = ""
@@ -458,9 +405,9 @@ class USART8251Emulator:
             if self.connected and self.socket:
                 try:
                     self.socket.send(bytes([data]))
-                    debug_verbose("NETWORK", f"Sent to network: 0x{data:02X}")
+                    debug.debug_verbose("NETWORK", f"Sent to network: 0x{data:02X}")
                 except Exception as e:
-                    debug_print("NETWORK", f"Network send error: {e}")
+                    debug.debug_print("NETWORK", f"Network send error: {e}")
                     self.disconnect_network()
             
             # Check for escape sequence (++++)
@@ -471,7 +418,7 @@ class USART8251Emulator:
                     self.escape_count = 1
                     
                 if self.escape_count >= 3:
-                    debug_print("HAYES", "Escape sequence detected, entering command mode")
+                    debug.debug_print("HAYES", "Escape sequence detected, entering command mode")
                     self.command_mode = True
                     self.escape_count = 0
                     self.send_response("OK")
@@ -498,15 +445,15 @@ class USART8251Emulator:
         elif cmd_upper == "I" or cmd_upper == "I0":
             return "Pico W 8251 USART Emulator v1.0"
         elif cmd_upper == "Z":
-            debug_print("HAYES", "Reset command received")
+            debug.debug_print("HAYES", "Reset command received")
             self.disconnect_network()
             self.command_mode = True
             return HAYES_OK
         elif cmd_upper == "&F":
-            debug_print("HAYES", "Factory defaults command")
+            debug.debug_print("HAYES", "Factory defaults command")
             return HAYES_OK
         elif cmd_upper == "H" or cmd_upper == "H0":
-            debug_print("HAYES", "Hang up command")
+            debug.debug_print("HAYES", "Hang up command")
             self.disconnect_network()
             return HAYES_OK
         elif cmd_upper.startswith("D"):
@@ -516,7 +463,7 @@ class USART8251Emulator:
         elif cmd_upper == "O" or cmd_upper == "O0":
             if self.connected:
                 self.command_mode = False
-                debug_print("HAYES", "Returning to online mode")
+                debug.debug_print("HAYES", "Returning to online mode")
                 return HAYES_CONNECT
             else:
                 return HAYES_NO_CARRIER
@@ -538,12 +485,12 @@ class USART8251Emulator:
         elif cmd_upper == "+CWFORGET":
             return self.process_wifi_forget()
         else:
-            debug_print("HAYES", f"Unknown command: {cmd}")
+            debug.debug_print("HAYES", f"Unknown command: {cmd}")
             return HAYES_ERROR
     
     def process_dial_command(self, number):
         """Process dial command to connect to host:port"""
-        debug_print("HAYES", f"Processing dial: {number}")
+        debug.debug_print("HAYES", f"Processing dial: {number}")
         
         # Parse host:port format
         if ':' in number:
@@ -551,7 +498,7 @@ class USART8251Emulator:
                 host, port_str = number.split(':', 1)
                 port = int(port_str)
             except ValueError:
-                debug_print("HAYES", f"Invalid dial format: {number}")
+                debug.debug_print("HAYES", f"Invalid dial format: {number}")
                 return HAYES_ERROR
         else:
             # Default to telnet port if no port specified
@@ -567,10 +514,10 @@ class USART8251Emulator:
     def connect_network(self, host, port):
         """Connect to network host"""
         if not self.wlan.isconnected():
-            debug_print("NETWORK", "Not connected to WiFi")
+            debug.debug_print("NETWORK", "Not connected to WiFi")
             return False
         
-        debug_print("NETWORK", f"Connecting to {host}:{port}")
+        debug.debug_print("NETWORK", f"Connecting to {host}:{port}")
         
         try:
             # Try DNS resolution first
@@ -579,12 +526,12 @@ class USART8251Emulator:
                 addr_info = socket_module.getaddrinfo(host, port)
                 if addr_info:
                     resolved_ip = addr_info[0][-1][0]
-                    debug_print("NETWORK", f"Resolved {host} to {resolved_ip}")
+                    debug.debug_print("NETWORK", f"Resolved {host} to {resolved_ip}")
                 else:
-                    debug_print("NETWORK", f"DNS failed for {host}")
+                    debug.debug_print("NETWORK", f"DNS failed for {host}")
                     return False
             except Exception as dns_e:
-                debug_print("NETWORK", f"DNS error: {dns_e}")
+                debug.debug_print("NETWORK", f"DNS error: {dns_e}")
                 resolved_ip = host  # Try as IP address
             
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -596,11 +543,11 @@ class USART8251Emulator:
             self.connection_host = host
             self.connection_port = port
             
-            debug_print("NETWORK", f"Connected to {host}:{port}")
+            debug.debug_print("NETWORK", f"Connected to {host}:{port}")
             return True
             
         except Exception as e:
-            debug_print("NETWORK", f"Connection failed: {e}")
+            debug.debug_print("NETWORK", f"Connection failed: {e}")
             if self.socket:
                 try:
                     self.socket.close()
@@ -614,7 +561,7 @@ class USART8251Emulator:
         if self.socket:
             try:
                 self.socket.close()
-                debug_print("NETWORK", "Socket closed")
+                debug.debug_print("NETWORK", "Socket closed")
             except:
                 pass
             self.socket = None
@@ -624,11 +571,11 @@ class USART8251Emulator:
         self.connection_port = None
         self.command_mode = True
         
-        debug_print("NETWORK", "Disconnected from network")
+        debug.debug_print("NETWORK", "Disconnected from network")
     
     def send_response(self, response):
         """Send Hayes response to host"""
-        debug_print("HAYES", f"Sending response: {response}")
+        debug.debug_print("HAYES", f"Sending response: {response}")
         
         # Add response to RX buffer for host to read
         response_bytes = (response + "\r\n").encode('ascii')
@@ -647,13 +594,13 @@ class USART8251Emulator:
     
     def process_wifi_scan(self):
         """Process AT+CWLAP command - scan for WiFi networks"""
-        debug_print("HAYES", "WiFi scan requested")
+        debug.debug_print("HAYES", "WiFi scan requested")
         
         if not self.wlan.active():
             return "ERROR: WiFi not active"
         
         try:
-            debug_print("NETWORK", "Scanning for WiFi networks...")
+            debug.debug_print("NETWORK", "Scanning for WiFi networks...")
             networks = self.wlan.scan()
             
             if not networks:
@@ -693,12 +640,12 @@ class USART8251Emulator:
             return response_lines[-1]  # Return OK
             
         except Exception as e:
-            debug_print("NETWORK", f"WiFi scan error: {e}")
+            debug.debug_print("NETWORK", f"WiFi scan error: {e}")
             return "ERROR: Scan failed"
     
     def process_wifi_query(self):
         """Process AT+CWJAP? command - query current WiFi connection"""
-        debug_print("HAYES", "WiFi connection query")
+        debug.debug_print("HAYES", "WiFi connection query")
         
         if not self.wlan.isconnected():
             return '+CWJAP:"",""'
@@ -713,12 +660,12 @@ class USART8251Emulator:
     
     def process_wifi_connect(self, cmd):
         """Process AT+CWJAP="ssid","password" command"""
-        debug_print("HAYES", f"WiFi connect command: {cmd}")
+        debug.debug_print("HAYES", f"WiFi connect command: {cmd}")
         
         # Parse the command: +CWJAP="ssid","password"
-        # Use regex to extract quoted strings (case-sensitive)
+        # Use case-insensitive regex for command, case-sensitive for parameters
         pattern = r'\+[Cc][Ww][Jj][Aa][Pp]="([^"]*)"(?:,"([^"]*)")?'
-        match = re.match(pattern, cmd)
+        match = re.search(pattern, cmd)
         
         if not match:
             return "ERROR: Invalid format. Use: AT+CWJAP=\"ssid\",\"password\""
@@ -728,7 +675,7 @@ class USART8251Emulator:
         
         # Debug output (mask password for security)
         masked_password = password[:2] + "*" * (len(password) - 2) if len(password) > 2 else "*" * len(password)
-        debug_print("NETWORK", f"Connecting to WiFi: '{ssid}' with password: '{masked_password}' (case-sensitive)")
+        debug.debug_print("NETWORK", f"Connecting to WiFi: '{ssid}' with password: '{masked_password}' (case-sensitive)")
         
         if self.connect_wifi(ssid, password):
             self._connected_ssid = ssid  # Store for query command
@@ -738,7 +685,7 @@ class USART8251Emulator:
     
     def process_wifi_disconnect(self):
         """Process AT+CWQAP command - disconnect from WiFi"""
-        debug_print("HAYES", "WiFi disconnect requested")
+        debug.debug_print("HAYES", "WiFi disconnect requested")
         
         try:
             if self.wlan.isconnected():
@@ -747,7 +694,7 @@ class USART8251Emulator:
                     self.disconnect_network()
                 
                 self.wlan.disconnect()
-                debug_print("NETWORK", "WiFi disconnected")
+                debug.debug_print("NETWORK", "WiFi disconnected")
                 
                 if hasattr(self, '_connected_ssid'):
                     delattr(self, '_connected_ssid')
@@ -757,12 +704,12 @@ class USART8251Emulator:
                 return "ERROR: Not connected to WiFi"
                 
         except Exception as e:
-            debug_print("NETWORK", f"WiFi disconnect error: {e}")
+            debug.debug_print("NETWORK", f"WiFi disconnect error: {e}")
             return "ERROR: Disconnect failed"
     
     def process_wifi_status(self):
         """Process AT+CWSTAT command - show detailed WiFi status"""
-        debug_print("HAYES", "WiFi status requested")
+        debug.debug_print("HAYES", "WiFi status requested")
         
         try:
             response_lines = []
@@ -794,12 +741,12 @@ class USART8251Emulator:
             return response_lines[-1]
             
         except Exception as e:
-            debug_print("NETWORK", f"WiFi status error: {e}")
+            debug.debug_print("NETWORK", f"WiFi status error: {e}")
             return "ERROR: Status query failed"
     
     def process_wifi_save(self):
         """Process AT+CWSAVE command - save current WiFi config"""
-        debug_print("HAYES", "WiFi save config requested")
+        debug.debug_print("HAYES", "WiFi save config requested")
         
         global wifi_ssid, wifi_password
         if wifi_ssid and wifi_password:
@@ -812,7 +759,7 @@ class USART8251Emulator:
     
     def process_wifi_auto(self, cmd):
         """Process AT+CWAUTO command - control auto-connect"""
-        debug_print("HAYES", f"WiFi auto-connect command: {cmd}")
+        debug.debug_print("HAYES", f"WiFi auto-connect command: {cmd}")
         
         global AUTO_CONNECT_ENABLED
         
@@ -836,7 +783,7 @@ class USART8251Emulator:
     
     def process_wifi_forget(self):
         """Process AT+CWFORGET command - clear saved WiFi config"""
-        debug_print("HAYES", "WiFi forget config requested")
+        debug.debug_print("HAYES", "WiFi forget config requested")
         
         if clear_wifi_config():
             global wifi_ssid, wifi_password
@@ -857,7 +804,7 @@ class USART8251Emulator:
             if ready[0]:
                 data = self.socket.recv(1024)
                 if data:
-                    debug_verbose("NETWORK", f"Received {len(data)} bytes from network")
+                    debug.debug_verbose("NETWORK", f"Received {len(data)} bytes from network")
                     
                     # Add to RX buffer
                     for byte in data:
@@ -869,13 +816,13 @@ class USART8251Emulator:
                     self.update_status_outputs()
                 else:
                     # Connection closed by remote
-                    debug_print("NETWORK", "Connection closed by remote")
+                    debug.debug_print("NETWORK", "Connection closed by remote")
                     self.disconnect_network()
                     self.send_response(HAYES_NO_CARRIER)
                     
         except OSError as e:
             if e.errno != 11:  # EAGAIN - no data available
-                debug_print("NETWORK", f"Network receive error: {e}")
+                debug.debug_print("NETWORK", f"Network receive error: {e}")
                 self.disconnect_network()
                 self.send_response(HAYES_NO_CARRIER)
     
@@ -887,7 +834,7 @@ class USART8251Emulator:
         last_reset = 0
         reset_processed = False
         
-        debug_print("INTERFACE", "Starting interface monitoring...")
+        debug.debug_print("INTERFACE", "Starting interface monitoring...")
         
         try:
             while True:
@@ -896,7 +843,7 @@ class USART8251Emulator:
                 
                 # Detect rising edge of reset (going from low to high)
                 if last_reset == 0 and current_reset == 1 and not reset_processed:
-                    debug_print("INTERFACE", "Reset signal asserted")
+                    debug.debug_print("INTERFACE", "Reset signal asserted")
                     self.status_register = STATUS_TXE | STATUS_TXRDY
                     self.mode_instruction_written = False
                     self.rx_buffer.clear()
@@ -924,7 +871,7 @@ class USART8251Emulator:
                 
                 # Detect falling edge of CS (chip selected)
                 if last_cs == 1 and cs == 0:
-                    debug_verbose("INTERFACE", "Chip selected")
+                    debug.debug_verbose("INTERFACE", "Chip selected")
                 
                 # Detect register access (CS low and RD or WR strobed)
                 if cs == 0:  # Chip is selected
@@ -933,14 +880,14 @@ class USART8251Emulator:
                         address = REG_STATUS_COMMAND if cd else REG_DATA
                         data = self.read_register(address)
                         self.write_data_bus(data)
-                        debug_print("INTERFACE", f"Read from {'STATUS' if cd else 'DATA'} register: 0x{data:02X}")
+                        debug.debug_print("INTERFACE", f"Read from {'STATUS' if cd else 'DATA'} register: 0x{data:02X}")
                     
                     # Write operation (WR falling edge)
                     elif last_wr == 1 and wr == 0:
                         address = REG_STATUS_COMMAND if cd else REG_DATA
                         data = self.read_data_bus()
                         self.write_register(address, data)
-                        debug_print("INTERFACE", f"Write to {'COMMAND' if cd else 'DATA'} register: 0x{data:02X}")
+                        debug.debug_print("INTERFACE", f"Write to {'COMMAND' if cd else 'DATA'} register: 0x{data:02X}")
                     
                     # Release data bus when not reading
                     elif rd == 1:
@@ -957,9 +904,9 @@ class USART8251Emulator:
                 time.sleep_us(10)  # Small delay to prevent excessive polling
                 
         except KeyboardInterrupt:
-            debug_print("INTERFACE", "Interface monitoring stopped by user")
+            debug.debug_print("INTERFACE", "Interface monitoring stopped by user")
         except Exception as e:
-            debug_print("INTERFACE", f"Interface monitoring error: {e}")
+            debug.debug_print("INTERFACE", f"Interface monitoring error: {e}")
             raise
     
     def get_status_summary(self):
@@ -982,35 +929,6 @@ class USART8251Emulator:
         return status
 
 # Command interface functions
-def cmd_pins(args):
-    """PINS command - show pin configuration and expected states"""
-    print("8251 USART PIN CONFIGURATION:")
-    print("-" * 40)
-    print("Data Bus:")
-    print("  GP0-GP7  = D0-D7 (bidirectional)")
-    print("")
-    print("Control Inputs (from host):")
-    print("  GP8  = C/D (Control/Data select)")
-    print("  GP9  = RD (Read strobe, active LOW)")
-    print("  GP10 = WR (Write strobe, active LOW)")
-    print("  GP11 = CS (Chip Select, active LOW)")
-    print("  GP12 = RESET (Reset, active HIGH)")
-    print("")
-    print("Status Outputs (to host):")
-    print("  GP13 = TxRDY (Transmitter Ready)")
-    print("  GP14 = RxRDY (Receiver Ready)")
-    print("")
-    print("Clock Input:")
-    print("  GP15 = CLK (Clock input)")
-    print("")
-    print("NORMAL IDLE STATE:")
-    print("  CS=1, RD=1, WR=1, RESET=0, C/D=X")
-    print("")
-    print("TROUBLESHOOTING:")
-    print("- If getting reset loops: Check GP12 is not floating")
-    print("- GP12 should be connected to GND or controlled by host")
-    print("- Use GPIO command to check current pin states")
-
 def cmd_connect(args):
     """CONNECT command - connect to host"""
     if not usart_instance:
@@ -1066,7 +984,7 @@ def cmd_reconnect(args):
     
     # First try current session credentials
     if wifi_ssid and wifi_password:
-        print(f"Reconnecting to {wifi_ssid} (from current session)...")
+        print(f"Reconnecting to {wifi_ssid}...")
         if usart_instance.connect_wifi(wifi_ssid, wifi_password):
             print("Reconnected successfully!")
             return
@@ -1076,7 +994,7 @@ def cmd_reconnect(args):
     # Try saved credentials if session credentials don't work
     ssid, password = load_wifi_config()
     if ssid and password:
-        print(f"Reconnecting to {ssid} (from saved config)...")
+        print(f"Reconnecting to {ssid}...")
         if usart_instance.connect_wifi(ssid, password):
             wifi_ssid = ssid
             wifi_password = password
@@ -1112,35 +1030,6 @@ def cmd_wifi(args):
         print("Credentials saved for auto-reconnect")
     else:
         print("WiFi connection failed")
-    """RECONNECT command - reconnect to last WiFi network"""
-    global wifi_ssid, wifi_password
-    
-    if not usart_instance:
-        print("ERROR: USART not initialized")
-        return
-    
-    # First try current session credentials
-    if wifi_ssid and wifi_password:
-        print(f"Reconnecting to {wifi_ssid} (from current session)...")
-        if usart_instance.connect_wifi(wifi_ssid, wifi_password):
-            print("Reconnected successfully!")
-            return
-        else:
-            print("Reconnection failed")
-    
-    # Try saved credentials if session credentials don't work
-    ssid, password = load_wifi_config()
-    if ssid and password:
-        print(f"Reconnecting to {ssid} (from saved config)...")
-        if usart_instance.connect_wifi(ssid, password):
-            wifi_ssid = ssid
-            wifi_password = password
-            print("Reconnected successfully!")
-        else:
-            print("Reconnection failed")
-    else:
-        print("No saved WiFi credentials found")
-        print("Use: WIFI <ssid> <password> to connect first")
 
 def cmd_forget_wifi(args):
     """FORGET_WIFI command - clear saved WiFi credentials"""
@@ -1162,27 +1051,20 @@ def cmd_wifi_status(args):
     print("WIFI STATUS:")
     print("-" * 30)
     
-    # Current connection
     if usart_instance.wlan.isconnected():
         config = usart_instance.wlan.ifconfig()
         print(f"Status: CONNECTED")
-        print(f"IP Address: {config[0]}")
-        print(f"Subnet: {config[1]}")
-        print(f"Gateway: {config[2]}")
-        print(f"DNS: {config[3]}")
-        
+        print(f"IP: {config[0]}")
         if hasattr(usart_instance, '_connected_ssid'):
             print(f"SSID: {usart_instance._connected_ssid}")
     else:
         print("Status: DISCONNECTED")
     
-    # Session credentials
     if wifi_ssid:
         print(f"Session SSID: {wifi_ssid}")
     else:
         print("Session SSID: None")
     
-    # Saved credentials
     saved_ssid, _ = load_wifi_config()
     if saved_ssid:
         print(f"Saved SSID: {saved_ssid}")
@@ -1209,25 +1091,6 @@ def cmd_auto_connect(args):
         print("Auto-connect disabled")
     else:
         print("Usage: AUTO_CONNECT on|off")
-    """WIFI command - connect to WiFi"""
-    if not usart_instance:
-        print("ERROR: USART not initialized")
-        return
-    
-    if len(args) < 2:
-        print("USAGE: WIFI <ssid> <password>")
-        print("EXAMPLE: WIFI MyNetwork MyPassword123")
-        return
-    
-    ssid = args[0]
-    password = args[1]
-    
-    print(f"Connecting to WiFi: {ssid}")
-    if usart_instance.connect_wifi(ssid, password):
-        config = usart_instance.wlan.ifconfig()
-        print(f"WiFi connected! IP: {config[0]}")
-    else:
-        print("WiFi connection failed")
 
 def cmd_status(args):
     """STATUS command - show system status"""
@@ -1315,46 +1178,47 @@ def cmd_gpio(args):
         print("Check if GP12 is connected to 3.3V or floating.")
         print("Expected: GP12 should be LOW (0V) during normal operation.")
 
+def cmd_pins(args):
+    """PINS command - show pin configuration and expected states"""
+    print("8251 USART PIN CONFIGURATION:")
+    print("-" * 40)
+    print("Data Bus:")
+    print("  GP0-GP7  = D0-D7 (bidirectional)")
+    print("")
+    print("Control Inputs (from host):")
+    print("  GP8  = C/D (Control/Data select)")
+    print("  GP9  = RD (Read strobe, active LOW)")
+    print("  GP10 = WR (Write strobe, active LOW)")
+    print("  GP11 = CS (Chip Select, active LOW)")
+    print("  GP12 = RESET (Reset, active HIGH)")
+    print("")
+    print("Status Outputs (to host):")
+    print("  GP13 = TxRDY (Transmitter Ready)")
+    print("  GP14 = RxRDY (Receiver Ready)")
+    print("")
+    print("Clock Input:")
+    print("  GP15 = CLK (Clock input)")
+    print("")
+    print("NORMAL IDLE STATE:")
+    print("  CS=1, RD=1, WR=1, RESET=0, C/D=X")
+    print("")
+    print("TROUBLESHOOTING:")
+    print("- If getting reset loops: Check GP12 is not floating")
+    print("- GP12 should be connected to GND or controlled by host")
+    print("- Use GPIO command to check current pin states")
+
 def cmd_debug(args):
     """DEBUG command - toggle debug categories"""
-    global DEBUG_GPIO, DEBUG_USART, DEBUG_NETWORK, DEBUG_HAYES, DEBUG_INTERFACE, DEBUG_SYSTEM, DEBUG_VERBOSE
-    
     if not args:
+        status = debug.get_debug_status()
         print("DEBUG CATEGORIES:")
-        print(f"  GPIO: {DEBUG_GPIO}")
-        print(f"  USART: {DEBUG_USART}")
-        print(f"  NETWORK: {DEBUG_NETWORK}")
-        print(f"  HAYES: {DEBUG_HAYES}")
-        print(f"  INTERFACE: {DEBUG_INTERFACE}")
-        print(f"  SYSTEM: {DEBUG_SYSTEM}")
-        print(f"  VERBOSE: {DEBUG_VERBOSE}")
+        for category, enabled in status.items():
+            print(f"  {category}: {enabled}")
         print("USAGE: DEBUG <category> to toggle")
         return
     
-    category = args[0].upper()
-    if category == "GPIO":
-        DEBUG_GPIO = not DEBUG_GPIO
-        print(f"GPIO debug: {DEBUG_GPIO}")
-    elif category == "USART":
-        DEBUG_USART = not DEBUG_USART
-        print(f"USART debug: {DEBUG_USART}")
-    elif category == "NETWORK":
-        DEBUG_NETWORK = not DEBUG_NETWORK
-        print(f"NETWORK debug: {DEBUG_NETWORK}")
-    elif category == "HAYES":
-        DEBUG_HAYES = not DEBUG_HAYES
-        print(f"HAYES debug: {DEBUG_HAYES}")
-    elif category == "INTERFACE":
-        DEBUG_INTERFACE = not DEBUG_INTERFACE
-        print(f"INTERFACE debug: {DEBUG_INTERFACE}")
-    elif category == "SYSTEM":
-        DEBUG_SYSTEM = not DEBUG_SYSTEM
-        print(f"SYSTEM debug: {DEBUG_SYSTEM}")
-    elif category == "VERBOSE":
-        DEBUG_VERBOSE = not DEBUG_VERBOSE
-        print(f"VERBOSE debug: {DEBUG_VERBOSE}")
-    else:
-        print(f"Unknown debug category: {category}")
+    result = debug.toggle_debug_category(args[0])
+    print(result)
 
 def cmd_help(args):
     """HELP command - show available commands"""
@@ -1427,7 +1291,7 @@ def process_command(command_line):
                 return False
         except Exception as e:
             print(f"COMMAND ERROR: {e}")
-            debug_print("SYSTEM", f"Command '{command}' failed: {e}")
+            debug.debug_print("SYSTEM", f"Command '{command}' failed: {e}")
     else:
         print(f"UNKNOWN COMMAND: {command}")
         print("Type HELP for available commands")
@@ -1452,52 +1316,52 @@ def command_interface():
                 print("\nUse QUIT to exit...")
                 continue
     except Exception as e:
-        debug_print("SYSTEM", f"Command interface error: {e}")
+        debug.debug_print("SYSTEM", f"Command interface error: {e}")
     
-    debug_print("SYSTEM", "Command interface terminated")
+    debug.debug_print("SYSTEM", "Command interface terminated")
 
 def core1_main():
     """Main function for core 1 (USART emulation)"""
     global usart_instance
     
-    debug_print("SYSTEM", "Core1: Starting USART emulator...")
+    debug.debug_print("SYSTEM", "Core1: Starting USART emulator...")
     
     try:
         usart_instance = USART8251Emulator()
-        debug_print("SYSTEM", "Core1: USART emulator ready")
+        debug.debug_print("SYSTEM", "Core1: USART emulator ready")
     except Exception as e:
-        debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
+        debug.debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
         return
     
     # Monitor interface
-    debug_print("SYSTEM", "Core1: Starting interface monitoring...")
+    debug.debug_print("SYSTEM", "Core1: Starting interface monitoring...")
     try:
         usart_instance.monitor_interface()
     except KeyboardInterrupt:
-        debug_print("SYSTEM", "Core1: Stopped by user")
+        debug.debug_print("SYSTEM", "Core1: Stopped by user")
     except Exception as e:
-        debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
+        debug.debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
         raise
 
 def main():
     """Main program"""
     global command_enabled
     
-    debug_print("SYSTEM", "8251 USART Emulator starting...")
-    debug_config_summary()
+    debug.debug_print("SYSTEM", "8251 USART Emulator starting...")
+    debug.debug_config_summary()
     
     print("8251 USART Emulator v1.0")
     print("Timex/Sinclair 2050 WiFi Replacement")
     
-    debug_memory()
+    debug.debug_memory()
     
     # Launch USART emulation on second core
-    debug_print("SYSTEM", "Starting Core1 thread...")
+    debug.debug_print("SYSTEM", "Starting Core1 thread...")
     try:
         _thread.start_new_thread(core1_main, ())
-        debug_print("SYSTEM", "Core1 thread started")
+        debug.debug_print("SYSTEM", "Core1 thread started")
     except Exception as e:
-        debug_print("SYSTEM", f"FATAL: Could not start Core1: {e}")
+        debug.debug_print("SYSTEM", f"FATAL: Could not start Core1: {e}")
         return
     
     # Wait for USART to initialize
@@ -1507,14 +1371,14 @@ def main():
         timeout -= 1
     
     if usart_instance is None:
-        debug_print("SYSTEM", "ERROR: USART failed to initialize")
+        debug.debug_print("SYSTEM", "ERROR: USART failed to initialize")
         return
     
-    debug_print("SYSTEM", "USART initialized, starting interface...")
+    debug.debug_print("SYSTEM", "USART initialized, starting interface...")
     
     # Try auto-connect to saved WiFi network
     if AUTO_CONNECT_ENABLED:
-        debug_print("SYSTEM", "Attempting auto-connect...")
+        debug.debug_print("SYSTEM", "Attempting auto-connect...")
         auto_connect_wifi()
     
     # Check memory status
@@ -1536,14 +1400,14 @@ def main():
     try:
         command_interface()
     except KeyboardInterrupt:
-        debug_print("SYSTEM", "Shutdown requested")
+        debug.debug_print("SYSTEM", "Shutdown requested")
         print("\nShutdown requested by user")
         command_enabled = False
     except Exception as e:
-        debug_print("SYSTEM", f"FATAL: {e}")
+        debug.debug_print("SYSTEM", f"FATAL: {e}")
         raise
     finally:
-        debug_print("SYSTEM", "8251 USART Emulator terminating")
+        debug.debug_print("SYSTEM", "8251 USART Emulator terminating")
 
 if __name__ == "__main__":
     main()
