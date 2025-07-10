@@ -1,78 +1,7 @@
 """
-8251 USART Emulator for RP2040 Pico W - MicroPython Version
-Emulates the Intel 8251 USART for Timex/Sinclair 2050 modem functionality
-
-v1.0 - INITIAL COMPLETE VERSION
-
-DEBUGGING FEATURES:
-- Comprehensive logging to Thonny console with timestamps
-- Categorized debug output (SYSTEM, GPIO, USART, NETWORK, HAYES, INTERFACE)
-- Memory usage monitoring
-- GPIO state tracking  
-- Network connection monitoring
-- Hayes AT command parsing and execution
-- Interface monitoring with register access logging
-
-INTERACTIVE COMMANDS (type in Thonny console):
-- CONNECT <host> <port>   Connect to telnet host: CONNECT towel.blinkenlights.nl 23
-- DISCONNECT              Disconnect current connection
-- AT <command>            Send Hayes AT command: AT DT5551234
-- STATUS                  Show system status and statistics
-- MEMORY                  Show memory usage
-- GPIO                    Show current GPIO pin states  
-- DEBUG <category>        Toggle debug category on/off
-- WIFI <ssid> <password>  Connect to WiFi network
-- HELP                    Show this command list
-
-DEBUG CONFIGURATION:
-Set the DEBUG_* flags below to control logging verbosity:
-- DEBUG_ENABLED: Master switch for all debugging
-- DEBUG_GPIO: Pin state changes and register access
-- DEBUG_USART: USART register operations and data flow
-- DEBUG_NETWORK: Network connection status and data
-- DEBUG_HAYES: Hayes AT command processing
-- DEBUG_INTERFACE: Host interface monitoring
-- DEBUG_SYSTEM: Initialization, memory usage, system status
-- DEBUG_VERBOSE: Extra detailed output
-
-HARDWARE CONNECTIONS (8251 USART interface):
-- GP0-GP7: Data bus D0-D7 (bidirectional)
-- GP8: C/D (Control/Data select)
-- GP9: RD (Read strobe, active low)
-- GP10: WR (Write strobe, active low)  
-- GP11: CS (Chip Select, active low)
-- GP12: RESET (Reset, active high)
-- GP13: TxRDY (Transmitter Ready output)
-- GP14: RxRDY (Receiver Ready output)
-- GP15: CLK (Clock input)
-
-HAYES AT COMMANDS SUPPORTED:
-- ATD<number>   Dial (connect to host:port format like ATD192.168.1.100:23)
-- ATH           Hang up (disconnect)
-- ATA           Answer (not implemented for client mode)
-- ATI           Information
-- ATZ           Reset modem
-- AT&F          Factory defaults
-- ATO           Return to online mode
-- +++           Escape to command mode
-
-WIFI AT COMMANDS:
-- AT+CWLAP      List available WiFi access points
-- AT+CWJAP?     Query current WiFi connection
-- AT+CWJAP="ssid","password"  Connect to WiFi network
-- AT+CWQAP      Disconnect from WiFi
-- AT+CWSTAT     Show WiFi connection status
-- AT+CWSCAN     Scan for networks (alias for CWLAP)
-
-USAGE:
-1. Connect to WiFi using WIFI command
-2. Use CONNECT command or ATD command to establish connections
-3. Monitor debug output in console
-4. Send commands via Z80 interface OR type commands in Thonny
-
-DEBUG OUTPUT FORMAT:
-[timestamp] CATEGORY: message
-Example: [00012847] HAYES: Processing AT command: ATD192.168.1.100:23
+8251 USART Emulator for RP2040 Pico W - v1.0
+Timex/Sinclair 2050 modem replacement with WiFi connectivity
+See README.md for complete documentation
 """
 
 import machine
@@ -87,11 +16,11 @@ import re
 
 # Debug configuration - Set these to True/False to control logging
 DEBUG_ENABLED = True      # Master debug switch
-DEBUG_GPIO = True         # GPIO pin state changes and register access
+DEBUG_GPIO = False        # GPIO pin state changes and register access
 DEBUG_USART = True        # USART register operations
 DEBUG_NETWORK = True      # Network operations
 DEBUG_HAYES = True        # Hayes AT command processing
-DEBUG_INTERFACE = True    # Interface monitoring
+DEBUG_INTERFACE = False   # Interface monitoring
 DEBUG_SYSTEM = True       # System initialization and memory
 DEBUG_VERBOSE = False     # Extra verbose output
 
@@ -142,24 +71,15 @@ def debug_print(category, message):
     """Print debug message with timestamp if debugging is enabled"""
     if not DEBUG_ENABLED:
         return
-        
-    timestamp = time.ticks_ms()
-    
     # Check category-specific debug flags
-    if category == "GPIO" and not DEBUG_GPIO:
+    if ((category == "GPIO" and not DEBUG_GPIO) or
+        (category == "USART" and not DEBUG_USART) or
+        (category == "NETWORK" and not DEBUG_NETWORK) or
+        (category == "HAYES" and not DEBUG_HAYES) or
+        (category == "INTERFACE" and not DEBUG_INTERFACE) or
+        (category == "SYSTEM" and not DEBUG_SYSTEM)):
         return
-    elif category == "USART" and not DEBUG_USART:
-        return
-    elif category == "NETWORK" and not DEBUG_NETWORK:
-        return
-    elif category == "HAYES" and not DEBUG_HAYES:
-        return
-    elif category == "INTERFACE" and not DEBUG_INTERFACE:
-        return
-    elif category == "SYSTEM" and not DEBUG_SYSTEM:
-        return
-        
-    print(f"[{timestamp:08d}] {category}: {message}")
+    print(f"[{time.ticks_ms():08d}] {category}: {message}")
 
 def debug_verbose(category, message):
     """Print verbose debug message only if verbose debugging is enabled"""
@@ -170,28 +90,94 @@ def debug_memory():
     """Print memory usage information"""
     if DEBUG_SYSTEM:
         gc.collect()
-        free = gc.mem_free()
-        alloc = gc.mem_alloc()
-        debug_print("SYSTEM", f"Memory: {free} free, {alloc} allocated")
+        debug_print("SYSTEM", f"Memory: {gc.mem_free()} free, {gc.mem_alloc()} allocated")
 
 def debug_config_summary():
     """Print current debug configuration"""
-    debug_print("SYSTEM", "=== DEBUG CONFIGURATION ===")
-    debug_print("SYSTEM", f"Master Debug: {DEBUG_ENABLED}")
-    debug_print("SYSTEM", f"GPIO Debug: {DEBUG_GPIO}")
-    debug_print("SYSTEM", f"USART Debug: {DEBUG_USART}")
-    debug_print("SYSTEM", f"Network Debug: {DEBUG_NETWORK}")
-    debug_print("SYSTEM", f"Hayes Debug: {DEBUG_HAYES}")
-    debug_print("SYSTEM", f"Interface Debug: {DEBUG_INTERFACE}")
-    debug_print("SYSTEM", f"System Debug: {DEBUG_SYSTEM}")
-    debug_print("SYSTEM", f"Verbose Debug: {DEBUG_VERBOSE}")
-    debug_print("SYSTEM", "=== END CONFIGURATION ===")
+    if DEBUG_SYSTEM:
+        debug_print("SYSTEM", f"Debug: GPIO={DEBUG_GPIO} USART={DEBUG_USART} NET={DEBUG_NETWORK} HAYES={DEBUG_HAYES}")
 
 # Global variables for command interface and system state
 usart_instance = None
 command_enabled = True
 wifi_ssid = None
 wifi_password = None
+
+# WiFi persistence settings
+WIFI_CONFIG_FILE = 'wifi_config.txt'
+AUTO_CONNECT_ENABLED = True
+
+def save_wifi_config(ssid, password):
+    """Save WiFi credentials to persistent storage"""
+    try:
+        with open(WIFI_CONFIG_FILE, 'w') as f:
+            f.write(f"{ssid}\n{password}")
+        debug_print("SYSTEM", f"WiFi config saved: {ssid}")
+        return True
+    except Exception as e:
+        debug_print("SYSTEM", f"Failed to save WiFi config: {e}")
+        return False
+
+def load_wifi_config():
+    """Load WiFi credentials from persistent storage"""
+    try:
+        with open(WIFI_CONFIG_FILE, 'r') as f:
+            lines = f.read().strip().split('\n')
+            if len(lines) >= 2:
+                ssid = lines[0]
+                password = lines[1]
+                debug_print("SYSTEM", f"WiFi config loaded: {ssid}")
+                return ssid, password
+            else:
+                debug_print("SYSTEM", "Invalid WiFi config file format")
+                return None, None
+    except OSError:
+        debug_print("SYSTEM", "No saved WiFi config found")
+        return None, None
+    except Exception as e:
+        debug_print("SYSTEM", f"Failed to load WiFi config: {e}")
+        return None, None
+
+def clear_wifi_config():
+    """Clear saved WiFi credentials"""
+    try:
+        import os
+        os.remove(WIFI_CONFIG_FILE)
+        debug_print("SYSTEM", "WiFi config cleared")
+        return True
+    except OSError:
+        debug_print("SYSTEM", "No WiFi config file to clear")
+        return True
+    except Exception as e:
+        debug_print("SYSTEM", f"Failed to clear WiFi config: {e}")
+        return False
+
+def auto_connect_wifi():
+    """Attempt to auto-connect using saved WiFi credentials"""
+    global wifi_ssid, wifi_password, usart_instance
+    
+    if not AUTO_CONNECT_ENABLED:
+        debug_print("SYSTEM", "Auto-connect disabled")
+        return False
+        
+    if not usart_instance:
+        debug_print("SYSTEM", "USART not initialized, skipping auto-connect")
+        return False
+    
+    ssid, password = load_wifi_config()
+    if ssid and password:
+        debug_print("SYSTEM", f"Auto-connecting to WiFi: {ssid}")
+        if usart_instance.connect_wifi(ssid, password):
+            wifi_ssid = ssid
+            wifi_password = password
+            debug_print("SYSTEM", "Auto-connect successful!")
+            return True
+        else:
+            debug_print("SYSTEM", "Auto-connect failed")
+            return False
+    else:
+        debug_print("SYSTEM", "No saved WiFi credentials for auto-connect")
+        return False
 
 class USART8251Emulator:
     def __init__(self):
@@ -254,40 +240,30 @@ class USART8251Emulator:
         """Initialize all GPIO pins for 8251 interface"""
         try:
             # Data bus pins (bidirectional, start as inputs with pull-down)
-            self.data_pins = []
-            for i in range(PIN_D0, PIN_D7 + 1):
-                pin = Pin(i, Pin.IN, Pin.PULL_DOWN)
-                self.data_pins.append(pin)
-                debug_verbose("GPIO", f"Initialized data pin GP{i}")
+            self.data_pins = [Pin(i, Pin.IN, Pin.PULL_DOWN) for i in range(PIN_D0, PIN_D7 + 1)]
             
             # Control pins (inputs with pull-up for active low signals)
             self.cd_pin = Pin(PIN_CD, Pin.IN, Pin.PULL_UP)
             self.rd_pin = Pin(PIN_RD, Pin.IN, Pin.PULL_UP)
             self.wr_pin = Pin(PIN_WR, Pin.IN, Pin.PULL_UP)
             self.cs_pin = Pin(PIN_CS, Pin.IN, Pin.PULL_UP)
-            # Reset pin with strong pull-down (active high)
-            self.reset_pin = Pin(PIN_RESET, Pin.IN, Pin.PULL_DOWN)
+            self.reset_pin = Pin(PIN_RESET, Pin.IN, Pin.PULL_DOWN)  # Reset pin (active high)
             
             # Status output pins
             self.txrdy_pin = Pin(PIN_TXRDY, Pin.OUT)
             self.rxrdy_pin = Pin(PIN_RXRDY, Pin.OUT)
+            self.clk_pin = Pin(PIN_CLK, Pin.IN)  # Clock input pin
             
-            # Clock input pin
-            self.clk_pin = Pin(PIN_CLK, Pin.IN)
-            
-            # Set initial output states
             self.update_status_outputs()
             
             # Check reset pin state at startup
-            initial_reset = self.reset_pin.value()
-            debug_print("GPIO", f"Initial reset pin state: {initial_reset}")
-            if initial_reset:
-                debug_print("GPIO", "WARNING: Reset pin is HIGH at startup! This may cause issues.")
+            if self.reset_pin.value():
+                debug_print("GPIO", "WARNING: Reset pin HIGH at startup!")
             
-            debug_print("GPIO", "All GPIO pins initialized successfully")
+            debug_print("GPIO", "GPIO pins initialized")
             
         except Exception as e:
-            debug_print("GPIO", f"GPIO initialization failed: {e}")
+            debug_print("GPIO", f"GPIO init failed: {e}")
             raise
     
     def setup_wifi(self):
@@ -315,18 +291,25 @@ class USART8251Emulator:
             self.wlan.connect(ssid, password)
             
             # Wait for connection with timeout
-            timeout = 20
+            timeout = 30  # Increased timeout for WiFi connections
             while not self.wlan.isconnected() and timeout > 0:
                 time.sleep(0.5)
                 timeout -= 1
-                debug_verbose("NETWORK", f"WiFi connecting... {timeout}s remaining")
             
             if self.wlan.isconnected():
                 config = self.wlan.ifconfig()
                 debug_print("NETWORK", f"WiFi connected! IP: {config[0]}")
+                
+                # Save credentials to global variables and persistent storage
+                global wifi_ssid, wifi_password
                 wifi_ssid = ssid
                 wifi_password = password
                 self._connected_ssid = ssid  # Store for AT+CWJAP? query
+                
+                # Save to persistent storage
+                if save_wifi_config(ssid, password):
+                    debug_print("NETWORK", "WiFi credentials saved")
+                
                 return True
             else:
                 debug_print("NETWORK", "WiFi connection failed - timeout")
@@ -499,35 +482,38 @@ class USART8251Emulator:
     
     def process_hayes_command(self, command):
         """Process Hayes AT command and return response"""
-        command = command.upper().strip()
+        command = command.strip()
         
-        if not command.startswith("AT"):
+        if not command.upper().startswith("AT"):
             return HAYES_ERROR
         
-        # Remove AT prefix
+        # Remove AT prefix but preserve case for parameters
         cmd = command[2:].strip()
+        
+        # Convert command portion to uppercase for comparison, but preserve parameter case
+        cmd_upper = cmd.upper()
         
         if cmd == "" or cmd == "":
             return HAYES_OK
-        elif cmd == "I" or cmd == "I0":
+        elif cmd_upper == "I" or cmd_upper == "I0":
             return "Pico W 8251 USART Emulator v1.0"
-        elif cmd == "Z":
+        elif cmd_upper == "Z":
             debug_print("HAYES", "Reset command received")
             self.disconnect_network()
             self.command_mode = True
             return HAYES_OK
-        elif cmd == "&F":
+        elif cmd_upper == "&F":
             debug_print("HAYES", "Factory defaults command")
             return HAYES_OK
-        elif cmd == "H" or cmd == "H0":
+        elif cmd_upper == "H" or cmd_upper == "H0":
             debug_print("HAYES", "Hang up command")
             self.disconnect_network()
             return HAYES_OK
-        elif cmd.startswith("D"):
+        elif cmd_upper.startswith("D"):
             # Dial command - expect format like D192.168.1.100:23
-            number = cmd[1:]
+            number = cmd[1:]  # Preserve original case
             return self.process_dial_command(number)
-        elif cmd == "O" or cmd == "O0":
+        elif cmd_upper == "O" or cmd_upper == "O0":
             if self.connected:
                 self.command_mode = False
                 debug_print("HAYES", "Returning to online mode")
@@ -535,16 +521,22 @@ class USART8251Emulator:
             else:
                 return HAYES_NO_CARRIER
         # WiFi AT commands
-        elif cmd == "+CWLAP" or cmd == "+CWSCAN":
+        elif cmd_upper == "+CWLAP" or cmd_upper == "+CWSCAN":
             return self.process_wifi_scan()
-        elif cmd == "+CWJAP?":
+        elif cmd_upper == "+CWJAP?":
             return self.process_wifi_query()
-        elif cmd.startswith("+CWJAP="):
-            return self.process_wifi_connect(cmd)
-        elif cmd == "+CWQAP":
+        elif cmd_upper.startswith("+CWJAP="):
+            return self.process_wifi_connect(cmd)  # Pass original case
+        elif cmd_upper == "+CWQAP":
             return self.process_wifi_disconnect()
-        elif cmd == "+CWSTAT":
+        elif cmd_upper == "+CWSTAT":
             return self.process_wifi_status()
+        elif cmd_upper == "+CWSAVE":
+            return self.process_wifi_save()
+        elif cmd_upper.startswith("+CWAUTO"):
+            return self.process_wifi_auto(cmd)
+        elif cmd_upper == "+CWFORGET":
+            return self.process_wifi_forget()
         else:
             debug_print("HAYES", f"Unknown command: {cmd}")
             return HAYES_ERROR
@@ -581,10 +573,24 @@ class USART8251Emulator:
         debug_print("NETWORK", f"Connecting to {host}:{port}")
         
         try:
+            # Try DNS resolution first
+            try:
+                import socket as socket_module
+                addr_info = socket_module.getaddrinfo(host, port)
+                if addr_info:
+                    resolved_ip = addr_info[0][-1][0]
+                    debug_print("NETWORK", f"Resolved {host} to {resolved_ip}")
+                else:
+                    debug_print("NETWORK", f"DNS failed for {host}")
+                    return False
+            except Exception as dns_e:
+                debug_print("NETWORK", f"DNS error: {dns_e}")
+                resolved_ip = host  # Try as IP address
+            
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)  # 10 second timeout
-            self.socket.connect((host, port))
-            self.socket.setblocking(False)  # Non-blocking for data handling
+            self.socket.settimeout(10.0)
+            self.socket.connect((resolved_ip, port))
+            self.socket.setblocking(False)
             
             self.connected = True
             self.connection_host = host
@@ -710,8 +716,8 @@ class USART8251Emulator:
         debug_print("HAYES", f"WiFi connect command: {cmd}")
         
         # Parse the command: +CWJAP="ssid","password"
-        # Use regex to extract quoted strings
-        pattern = r'\+CWJAP="([^"]*)"(?:,"([^"]*)")?'
+        # Use regex to extract quoted strings (case-sensitive)
+        pattern = r'\+[Cc][Ww][Jj][Aa][Pp]="([^"]*)"(?:,"([^"]*)")?'
         match = re.match(pattern, cmd)
         
         if not match:
@@ -720,7 +726,9 @@ class USART8251Emulator:
         ssid = match.group(1)
         password = match.group(2) if match.group(2) is not None else ""
         
-        debug_print("NETWORK", f"Connecting to WiFi: {ssid}")
+        # Debug output (mask password for security)
+        masked_password = password[:2] + "*" * (len(password) - 2) if len(password) > 2 else "*" * len(password)
+        debug_print("NETWORK", f"Connecting to WiFi: '{ssid}' with password: '{masked_password}' (case-sensitive)")
         
         if self.connect_wifi(ssid, password):
             self._connected_ssid = ssid  # Store for query command
@@ -788,6 +796,55 @@ class USART8251Emulator:
         except Exception as e:
             debug_print("NETWORK", f"WiFi status error: {e}")
             return "ERROR: Status query failed"
+    
+    def process_wifi_save(self):
+        """Process AT+CWSAVE command - save current WiFi config"""
+        debug_print("HAYES", "WiFi save config requested")
+        
+        global wifi_ssid, wifi_password
+        if wifi_ssid and wifi_password:
+            if save_wifi_config(wifi_ssid, wifi_password):
+                return "OK: WiFi config saved"
+            else:
+                return "ERROR: Failed to save config"
+        else:
+            return "ERROR: No WiFi connection to save"
+    
+    def process_wifi_auto(self, cmd):
+        """Process AT+CWAUTO command - control auto-connect"""
+        debug_print("HAYES", f"WiFi auto-connect command: {cmd}")
+        
+        global AUTO_CONNECT_ENABLED
+        
+        # Parse AT+CWAUTO=1 or AT+CWAUTO=0
+        if "=" in cmd:
+            try:
+                setting = cmd.split("=")[1].strip()
+                if setting == "1":
+                    AUTO_CONNECT_ENABLED = True
+                    return "OK: Auto-connect enabled"
+                elif setting == "0":
+                    AUTO_CONNECT_ENABLED = False
+                    return "OK: Auto-connect disabled"
+                else:
+                    return "ERROR: Use AT+CWAUTO=1 or AT+CWAUTO=0"
+            except:
+                return "ERROR: Invalid format"
+        else:
+            # Query current setting
+            return f"+CWAUTO:{1 if AUTO_CONNECT_ENABLED else 0}"
+    
+    def process_wifi_forget(self):
+        """Process AT+CWFORGET command - clear saved WiFi config"""
+        debug_print("HAYES", "WiFi forget config requested")
+        
+        if clear_wifi_config():
+            global wifi_ssid, wifi_password
+            wifi_ssid = None
+            wifi_password = None
+            return "OK: WiFi config cleared"
+        else:
+            return "ERROR: Failed to clear config"
     
     def handle_network_data(self):
         """Handle incoming network data"""
@@ -962,16 +1019,13 @@ def cmd_connect(args):
     
     if len(args) < 2:
         print("USAGE: CONNECT <host> <port>")
-        print("EXAMPLES:")
-        print("  CONNECT towel.blinkenlights.nl 23")
-        print("  CONNECT 192.168.1.100 22")
         return
     
     host = args[0]
     try:
         port = int(args[1])
     except ValueError:
-        print(f"ERROR: Invalid port number: {args[1]}")
+        print(f"ERROR: Invalid port: {args[1]}")
         return
     
     if usart_instance.connect_network(host, port):
@@ -984,7 +1038,6 @@ def cmd_disconnect(args):
     if not usart_instance:
         print("ERROR: USART not initialized")
         return
-    
     usart_instance.disconnect_network()
     print("DISCONNECTED")
 
@@ -996,13 +1049,6 @@ def cmd_at(args):
     
     if not args:
         print("USAGE: AT <command>")
-        print("EXAMPLES:")
-        print("  AT I")
-        print("  AT D192.168.1.100:23")
-        print("  AT H")
-        print("  AT +CWLAP")
-        print('  AT +CWJAP="MyNetwork","MyPassword"')
-        print("  AT +CWSTAT")
         return
     
     command = "AT" + " ".join(args)
@@ -1010,7 +1056,159 @@ def cmd_at(args):
     print(f"COMMAND: {command}")
     print(f"RESPONSE: {response}")
 
+def cmd_reconnect(args):
+    """RECONNECT command - reconnect to last WiFi network"""
+    global wifi_ssid, wifi_password
+    
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    # First try current session credentials
+    if wifi_ssid and wifi_password:
+        print(f"Reconnecting to {wifi_ssid} (from current session)...")
+        if usart_instance.connect_wifi(wifi_ssid, wifi_password):
+            print("Reconnected successfully!")
+            return
+        else:
+            print("Reconnection failed")
+    
+    # Try saved credentials if session credentials don't work
+    ssid, password = load_wifi_config()
+    if ssid and password:
+        print(f"Reconnecting to {ssid} (from saved config)...")
+        if usart_instance.connect_wifi(ssid, password):
+            wifi_ssid = ssid
+            wifi_password = password
+            print("Reconnected successfully!")
+        else:
+            print("Reconnection failed")
+    else:
+        print("No saved WiFi credentials found")
+        print("Use: WIFI <ssid> <password> to connect first")
+
 def cmd_wifi(args):
+    """WIFI command - connect to WiFi"""
+    global wifi_ssid, wifi_password
+    
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    if len(args) < 2:
+        print("USAGE: WIFI <ssid> <password>")
+        print("OTHER: RECONNECT | WIFI_STATUS | FORGET_WIFI | AUTO_CONNECT on/off")
+        return
+    
+    ssid = args[0]
+    password = args[1]
+    
+    print(f"Connecting to WiFi: {ssid}")
+    if usart_instance.connect_wifi(ssid, password):
+        wifi_ssid = ssid
+        wifi_password = password
+        config = usart_instance.wlan.ifconfig()
+        print(f"WiFi connected! IP: {config[0]}")
+        print("Credentials saved for auto-reconnect")
+    else:
+        print("WiFi connection failed")
+    """RECONNECT command - reconnect to last WiFi network"""
+    global wifi_ssid, wifi_password
+    
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    # First try current session credentials
+    if wifi_ssid and wifi_password:
+        print(f"Reconnecting to {wifi_ssid} (from current session)...")
+        if usart_instance.connect_wifi(wifi_ssid, wifi_password):
+            print("Reconnected successfully!")
+            return
+        else:
+            print("Reconnection failed")
+    
+    # Try saved credentials if session credentials don't work
+    ssid, password = load_wifi_config()
+    if ssid and password:
+        print(f"Reconnecting to {ssid} (from saved config)...")
+        if usart_instance.connect_wifi(ssid, password):
+            wifi_ssid = ssid
+            wifi_password = password
+            print("Reconnected successfully!")
+        else:
+            print("Reconnection failed")
+    else:
+        print("No saved WiFi credentials found")
+        print("Use: WIFI <ssid> <password> to connect first")
+
+def cmd_forget_wifi(args):
+    """FORGET_WIFI command - clear saved WiFi credentials"""
+    global wifi_ssid, wifi_password
+    
+    if clear_wifi_config():
+        wifi_ssid = None
+        wifi_password = None
+        print("Saved WiFi credentials cleared")
+    else:
+        print("Failed to clear WiFi credentials")
+
+def cmd_wifi_status(args):
+    """WIFI_STATUS command - show detailed WiFi status"""
+    if not usart_instance:
+        print("ERROR: USART not initialized")
+        return
+    
+    print("WIFI STATUS:")
+    print("-" * 30)
+    
+    # Current connection
+    if usart_instance.wlan.isconnected():
+        config = usart_instance.wlan.ifconfig()
+        print(f"Status: CONNECTED")
+        print(f"IP Address: {config[0]}")
+        print(f"Subnet: {config[1]}")
+        print(f"Gateway: {config[2]}")
+        print(f"DNS: {config[3]}")
+        
+        if hasattr(usart_instance, '_connected_ssid'):
+            print(f"SSID: {usart_instance._connected_ssid}")
+    else:
+        print("Status: DISCONNECTED")
+    
+    # Session credentials
+    if wifi_ssid:
+        print(f"Session SSID: {wifi_ssid}")
+    else:
+        print("Session SSID: None")
+    
+    # Saved credentials
+    saved_ssid, _ = load_wifi_config()
+    if saved_ssid:
+        print(f"Saved SSID: {saved_ssid}")
+    else:
+        print("Saved SSID: None")
+    
+    print(f"Auto-connect: {'Enabled' if AUTO_CONNECT_ENABLED else 'Disabled'}")
+
+def cmd_auto_connect(args):
+    """AUTO_CONNECT command - toggle auto-connect feature"""
+    global AUTO_CONNECT_ENABLED
+    
+    if not args:
+        print(f"Auto-connect is currently: {'Enabled' if AUTO_CONNECT_ENABLED else 'Disabled'}")
+        print("Usage: AUTO_CONNECT on|off")
+        return
+    
+    setting = args[0].lower()
+    if setting in ['on', 'enable', 'true', '1']:
+        AUTO_CONNECT_ENABLED = True
+        print("Auto-connect enabled")
+    elif setting in ['off', 'disable', 'false', '0']:
+        AUTO_CONNECT_ENABLED = False
+        print("Auto-connect disabled")
+    else:
+        print("Usage: AUTO_CONNECT on|off")
     """WIFI command - connect to WiFi"""
     if not usart_instance:
         print("ERROR: USART not initialized")
@@ -1160,43 +1358,22 @@ def cmd_debug(args):
 
 def cmd_help(args):
     """HELP command - show available commands"""
-    print("8251 USART EMULATOR COMMANDS:")
-    print("-" * 40)
-    print("CONNECT <host> <port>   Connect to telnet/SSH host")
-    print("DISCONNECT              Disconnect current connection")
-    print("AT <command>            Send Hayes AT command")
-    print("WIFI <ssid> <password>  Connect to WiFi network")
-    print("STATUS                  Show system status")
-    print("MEMORY                  Show memory usage")
-    print("GPIO                    Show GPIO pin states")
-    print("PINS                    Show pin configuration")
-    print("DEBUG <category>        Toggle debug category")
-    print("HELP                    Show this help")
-    print("QUIT/EXIT/BYE          Exit command interface")
+    print("8251 USART EMULATOR - QUICK REFERENCE:")
+    print("=" * 45)
+    print("WiFi: WIFI <ssid> <pass> | RECONNECT | FORGET_WIFI")
+    print("Connect: CONNECT <host> <port> | DISCONNECT") 
+    print("AT Commands: AT <cmd> (see README for full list)")
+    print("System: STATUS | MEMORY | GPIO | PINS | DEBUG <cat>")
+    print("Control: QUIT | HELP")
     print("")
-    print("HAYES AT COMMANDS:")
-    print("ATI       - Information")
-    print("ATZ       - Reset modem") 
-    print("ATH       - Hang up")
-    print("ATD<host:port> - Dial/connect")
-    print("ATO       - Return to online mode")
-    print("+++       - Escape to command mode")
+    print("Examples:")
+    print("  WIFI MyNet MyPass")
+    print("  RECONNECT") 
+    print("  CONNECT bbs.fozztexx.com 23")
+    print("  AT D192.168.1.1:23")
+    print("  AT +CWLAP")
     print("")
-    print("WIFI AT COMMANDS:")
-    print("AT+CWLAP  - List/scan WiFi networks")
-    print("AT+CWJAP? - Query current WiFi connection")
-    print('AT+CWJAP="ssid","pass" - Connect to WiFi')
-    print("AT+CWQAP  - Disconnect from WiFi")
-    print("AT+CWSTAT - Show WiFi status details")
-    print("AT+CWSCAN - Alias for CWLAP")
-    print("")
-    print("EXAMPLES:")
-    print("WIFI MyNetwork MyPassword")
-    print("CONNECT towel.blinkenlights.nl 23")
-    print("AT DTowel.blinkenlights.nl:23")
-    print("AT +CWLAP")
-    print('AT +CWJAP="MyNetwork","MyPassword"')
-    print("AT H")
+    print("See README.md for complete command reference")
 
 def cmd_quit(args):
     """QUIT command - exit command interface"""
@@ -1211,6 +1388,10 @@ COMMANDS = {
     'DISCONNECT': cmd_disconnect,
     'AT': cmd_at,
     'WIFI': cmd_wifi,
+    'RECONNECT': cmd_reconnect,
+    'FORGET_WIFI': cmd_forget_wifi,
+    'WIFI_STATUS': cmd_wifi_status,
+    'AUTO_CONNECT': cmd_auto_connect,
     'STATUS': cmd_status,
     'MEMORY': cmd_memory,
     'GPIO': cmd_gpio,
@@ -1255,31 +1436,20 @@ def process_command(command_line):
 
 def command_interface():
     """Interactive command interface"""
-    print("\n" + "="*50)
-    print("8251 USART EMULATOR COMMAND INTERFACE READY")
-    print("Type HELP for available commands")
-    print("Examples:")
-    print("  WIFI MyNetwork MyPassword")
-    print("  CONNECT towel.blinkenlights.nl 23")
-    print("  AT DTowel.blinkenlights.nl:23")
-    print("  STATUS")
-    print("  QUIT")
-    print("="*50)
+    print("\n8251 USART EMULATOR READY")
+    print("HELP for commands | QUIT to exit")
     
     try:
         while command_enabled:
             try:
-                # Get command from user
                 command_line = input("> ")
                 if not process_command(command_line):
-                    break  # User requested quit
+                    break
             except EOFError:
-                # Handle Ctrl+D
                 print("\nGoodbye!")
                 break
             except KeyboardInterrupt:
-                # Handle Ctrl+C
-                print("\nUse QUIT to exit or continue typing commands...")
+                print("\nUse QUIT to exit...")
                 continue
     except Exception as e:
         debug_print("SYSTEM", f"Command interface error: {e}")
@@ -1290,14 +1460,13 @@ def core1_main():
     """Main function for core 1 (USART emulation)"""
     global usart_instance
     
-    debug_print("SYSTEM", "=== CORE1 STARTED ===")
-    debug_print("SYSTEM", "Core1: Initializing 8251 USART emulator...")
+    debug_print("SYSTEM", "Core1: Starting USART emulator...")
     
     try:
         usart_instance = USART8251Emulator()
-        debug_print("SYSTEM", "Core1: 8251 USART emulator initialized successfully")
+        debug_print("SYSTEM", "Core1: USART emulator ready")
     except Exception as e:
-        debug_print("SYSTEM", f"Core1: FATAL ERROR during initialization: {e}")
+        debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
         return
     
     # Monitor interface
@@ -1305,38 +1474,34 @@ def core1_main():
     try:
         usart_instance.monitor_interface()
     except KeyboardInterrupt:
-        debug_print("SYSTEM", "Core1: Interface monitoring stopped by user")
+        debug_print("SYSTEM", "Core1: Stopped by user")
     except Exception as e:
-        debug_print("SYSTEM", f"Core1: FATAL ERROR in interface monitoring: {e}")
+        debug_print("SYSTEM", f"Core1: FATAL ERROR: {e}")
         raise
 
 def main():
     """Main program"""
     global command_enabled
     
-    debug_print("SYSTEM", "=== 8251 USART EMULATOR STARTING ===")
+    debug_print("SYSTEM", "8251 USART Emulator starting...")
     debug_config_summary()
     
-    print("***************************")
-    print("*  8251 USART Emulator    *") 
-    print("*  Timex/Sinclair 2050    *")
-    print("*  Modem Replacement v1.0 *")
-    print("***************************")
+    print("8251 USART Emulator v1.0")
+    print("Timex/Sinclair 2050 WiFi Replacement")
     
     debug_memory()
     
     # Launch USART emulation on second core
-    debug_print("SYSTEM", "Starting Core1 thread for USART emulation...")
+    debug_print("SYSTEM", "Starting Core1 thread...")
     try:
         _thread.start_new_thread(core1_main, ())
-        debug_print("SYSTEM", "Core1 thread started successfully")
+        debug_print("SYSTEM", "Core1 thread started")
     except Exception as e:
-        debug_print("SYSTEM", f"FATAL ERROR: Could not start Core1 thread: {e}")
+        debug_print("SYSTEM", f"FATAL: Could not start Core1: {e}")
         return
     
     # Wait for USART to initialize
-    debug_print("SYSTEM", "Waiting for USART initialization...")
-    timeout = 50  # 5 seconds
+    timeout = 50
     while usart_instance is None and timeout > 0:
         time.sleep(0.1)
         timeout -= 1
@@ -1345,42 +1510,40 @@ def main():
         debug_print("SYSTEM", "ERROR: USART failed to initialize")
         return
     
-    debug_print("SYSTEM", "USART initialized, starting command interface...")
+    debug_print("SYSTEM", "USART initialized, starting interface...")
+    
+    # Try auto-connect to saved WiFi network
+    if AUTO_CONNECT_ENABLED:
+        debug_print("SYSTEM", "Attempting auto-connect...")
+        auto_connect_wifi()
     
     # Check memory status
     gc.collect()
     free_mem = gc.mem_free()
     if free_mem < 20000:
-        print(f"\nWARNING: Low memory ({free_mem} bytes free)")
+        print(f"WARNING: Low memory ({free_mem} bytes)")
     else:
-        print(f"\nMemory OK: {free_mem} bytes available")
+        print(f"Memory: {free_mem} bytes available")
     
-    # Hardware setup reminder
-    print("\nHARDWARE CONNECTIONS:")
-    print("Data Bus: GP0-GP7 (D0-D7)")
-    print("Control:  GP8=C/D, GP9=RD, GP10=WR, GP11=CS, GP12=RESET")
-    print("Status:   GP13=TxRDY, GP14=RxRDY")
-    print("Clock:    GP15=CLK")
-    
-    print("\nGETTING STARTED:")
-    print("1. Connect to WiFi: WIFI YourSSID YourPassword")
-    print("   Or use AT command: AT +CWJAP=\"YourSSID\",\"YourPassword\"")
-    print("2. Scan networks: AT +CWLAP")
-    print("3. Connect to host: CONNECT hostname port")
-    print("4. Or use AT commands: AT Dhostname:port")
+    print("\nQuick Start:")
+    print("1. WIFI YourSSID YourPassword")
+    print("2. RECONNECT (for saved networks)")
+    print("3. CONNECT hostname port")
+    print("4. AT Dhostname:port")
+    print("5. Type HELP for commands")
     
     # Main core runs the command interface
     try:
         command_interface()
     except KeyboardInterrupt:
-        debug_print("SYSTEM", "=== SHUTDOWN: Keyboard interrupt received ===")
+        debug_print("SYSTEM", "Shutdown requested")
         print("\nShutdown requested by user")
         command_enabled = False
     except Exception as e:
-        debug_print("SYSTEM", f"=== FATAL ERROR in command interface: {e} ===")
+        debug_print("SYSTEM", f"FATAL: {e}")
         raise
     finally:
-        debug_print("SYSTEM", "=== 8251 USART EMULATOR TERMINATING ===")
+        debug_print("SYSTEM", "8251 USART Emulator terminating")
 
 if __name__ == "__main__":
     main()
